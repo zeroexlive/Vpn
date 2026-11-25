@@ -329,6 +329,27 @@ static int connect_via_proxy(const char *host, int port, char *err, size_t err_c
     return fd;
 }
 
+/* Get a cookie's value by name from the jar (no allocation). */
+static const char *cookie_value(feilian_client *c, const char *name,
+                                char *out, size_t cap) {
+    size_t nl = strlen(name);
+    const char *at = c->cookies;
+    while (at && *at) {
+        const char *sep = strstr(at, "; ");
+        size_t len = sep ? (size_t)(sep - at) : strlen(at);
+        const char *eq = memchr(at, '=', len);
+        if (eq && (size_t)(eq - at) == nl && strncmp(at, name, nl) == 0) {
+            size_t vl = len - nl - 1;
+            if (vl >= cap) vl = cap - 1;
+            memcpy(out, eq + 1, vl);
+            out[vl] = '\0';
+            return out;
+        }
+        at = sep ? sep + 2 : NULL;
+    }
+    return NULL;
+}
+
 int feilian_https(feilian_client *c, const char *method, const char *url,
                   const char *json_body, char *body, size_t cap) {
     /* Always clear the reply first: on a transport failure (-1) the
@@ -419,6 +440,20 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
         method, path, host, FEILIAN_USER_AGENT);
     if (c->cookies[0])
         n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", c->cookies);
+    /* CSRF headers — the portal's public web JS sends these on
+     * EVERY request (getCsrfTokenHeaders: the csrf-token and
+     * admin-csrf-token cookie values as headers). Login and
+     * /api/mfa/code/verify worked without them, but the gateway
+     * node's /vpn/conn enforces the check and answers 10220001
+     * "Cookies are missing" when the header is absent, even
+     * though the cookies themselves are in the jar. */
+    {
+        char tok[512];
+        if (cookie_value(c, "csrf-token", tok, sizeof tok))
+            n += snprintf(req + n, sizeof req - (size_t)n, "csrf-token: %s\r\n", tok);
+        if (cookie_value(c, "admin-csrf-token", tok, sizeof tok))
+            n += snprintf(req + n, sizeof req - (size_t)n, "admin-csrf-token: %s\r\n", tok);
+    }
     if (json_body)
         n += snprintf(req + n, sizeof req - (size_t)n,
                       "Content-Length: %zu\r\n", strlen(json_body));
