@@ -320,7 +320,24 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     if (fd < 0) return -1;
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
-    if (c->self_signed_cert[0]) {
+    /* VPN gateway nodes are reached by IP (e.g. 98.98.44.174:11451)
+     * and their cert is issued for the corp domain, not the IP, so
+     * verification would always fail there. The node address comes
+     * from the server's own /api/vpn/list reply, over the already
+     * authenticated portal session — trust it like the official
+     * client trusts the corp cert, but still require TLS. */
+    int host_is_ip = 1;
+    {
+        int dots = 0;
+        for (const char *p = host; *p; p++) {
+            if (*p == '.') dots++;
+            else if (*p < '0' || *p > '9') { host_is_ip = 0; break; }
+        }
+        if (dots != 3) host_is_ip = 0;
+    }
+    if (host_is_ip) {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    } else if (c->self_signed_cert[0]) {
         /* Trust the corp cert the match reply gave us (official client
          * does the same — the bridge trusts enable_self_signed /
          * self_signed_cert). This is what makes login/setting work

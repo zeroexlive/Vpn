@@ -137,16 +137,20 @@ static void do_connect(App *a) {
         return;
     }
     app_logf(a, "OTP accepted. Fetching the VPN list to find the gateway to connect to…");
-    /* 2. GET /api/vpn/list. In the old corplink-go flow the list
-     * carried a per-node url, and /vpn/conn was posted to that
-     * node — not to the portal. The 404 came from posting it to
-     * the portal (ourbit.sealsuite.com). */
+    /* 2. GET /api/vpn/list. The list has no "url" field — each
+     * node has "ip" + "api_port" (here: 98.98.44.174:11451,
+     * vpn_port 11450). /vpn/conn lives on the NODE, not the
+     * portal: posting it to ourbit.sealsuite.com gives 404,
+     * while the node answers on 11451 (an HTTP request there
+     * gets "Client sent an HTTP request to an HTTPS server"). */
     st = feilian_list_vpn(&a->api, body, sizeof body);
     app_logf(a, "vpn/list: HTTP %d", st);
     app_logf(a, "%.800s", body);
     char node_base[512] = "";
     if (st == 200) {
-        /* First "url" value in the list reply, if any. */
+        char node_ip[64] = "";
+        long api_port = 0;
+        /* First "url" value, if the old corplink-go shape shows up. */
         const char *u = strstr(body, "\"url\"");
         if (u) {
             const char *q = strchr(u + 5, '"');
@@ -156,6 +160,31 @@ static void do_connect(App *a) {
                     memcpy(node_base, q + 1, (size_t)(e - (q + 1)));
                     node_base[e - (q + 1)] = '\0';
                 }
+            }
+        }
+        if (!node_base[0]) {
+            /* New shape: "ip":"98.98.44.174", "api_port":11451. */
+            const char *ip = strstr(body, "\"ip\"");
+            if (ip) {
+                const char *q = strchr(ip + 4, '"');
+                if (q) {
+                    const char *e = strchr(q + 1, '"');
+                    if (e && (size_t)(e - (q + 1)) < sizeof node_ip) {
+                        memcpy(node_ip, q + 1, (size_t)(e - (q + 1)));
+                        node_ip[e - (q + 1)] = '\0';
+                    }
+                }
+            }
+            const char *ap = strstr(body, "\"api_port\"");
+            if (ap) {
+                const char *colon = strchr(ap, ':');
+                if (colon) api_port = strtol(colon + 1, NULL, 10);
+            }
+            if (node_ip[0]) {
+                if (api_port > 0)
+                    snprintf(node_base, sizeof node_base, "https://%s:%ld", node_ip, api_port);
+                else
+                    snprintf(node_base, sizeof node_base, "https://%s", node_ip);
             }
         }
     }
