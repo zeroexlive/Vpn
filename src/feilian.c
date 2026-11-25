@@ -163,12 +163,56 @@ static void accumulate_cookies(feilian_client *c, const char *headers) {
         if (n >= sizeof pair) n = sizeof pair - 1;
         memcpy(pair, p, n);
         pair[n] = '\0';
-        if (!strstr(c->cookies, pair)) {
+        /* Replace by cookie NAME, not by whole pair: the server
+         * rotates session cookies (same name, new value), and
+         * sending both the stale and the fresh value made the
+         * node read the stale one ("Cookies are missing"). */
+        const char *eq = strchr(pair, '=');
+        size_t name_len = eq ? (size_t)(eq - pair) : strlen(pair);
+        char *at = c->cookies;
+        int replaced = 0;
+        while (at && *at) {
+            char *sep = strstr(at, "; ");
+            size_t cur_len = sep ? (size_t)(sep - at) : strlen(at);
+            const char *cur_eq = memchr(at, '=', cur_len);
+            size_t cur_name = cur_eq ? (size_t)(cur_eq - at) : cur_len;
+            if (cur_name == name_len && strncmp(at, pair, name_len) == 0) {
+                char rest[4096] = "";
+                if (sep) strncpy(rest, sep + 2, sizeof rest - 1);
+                size_t head = (size_t)(at - c->cookies);
+                size_t tail = strlen(rest);
+                if (head + n + (tail ? 2 : 0) + tail < sizeof c->cookies) {
+                    memmove(c->cookies + head + n + (tail ? 2 : 0), rest, tail + 1);
+                    memcpy(c->cookies + head, pair, n);
+                    if (tail) memcpy(c->cookies + head + n, "; ", 2);
+                }
+                replaced = 1;
+                break;
+            }
+            at = sep ? sep + 2 : NULL;
+        }
+        if (!replaced) {
             if (c->cookies[0]) strncat(c->cookies, "; ", sizeof c->cookies - strlen(c->cookies) - 1);
             strncat(c->cookies, pair, sizeof c->cookies - strlen(c->cookies) - 1);
         }
         p = end;
     }
+}
+
+/* Cookie NAMES held (values never logged — they are session tokens). */
+void feilian_log_cookie_names(feilian_client *c, char *log, size_t cap) {
+    char names[1024] = "";
+    const char *at = c->cookies;
+    while (at && *at) {
+        const char *sep = strstr(at, "; ");
+        size_t len = sep ? (size_t)(sep - at) : strlen(at);
+        const char *eq = memchr(at, '=', len);
+        size_t nl = eq ? (size_t)(eq - at) : len;
+        if (names[0]) strncat(names, ", ", sizeof names - strlen(names) - 1);
+        strncat(names, at, nl < sizeof names - strlen(names) - 1 ? nl : sizeof names - strlen(names) - 1);
+        at = sep ? sep + 2 : NULL;
+    }
+    feilian_log(log, cap, "Cookies held (%zu chars): %s", strlen(c->cookies), names[0] ? names : "(none)");
 }
 
 /* Plain TCP connect, no TLS. 10 s timeout, tries every resolved

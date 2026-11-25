@@ -57,6 +57,7 @@ typedef struct {
     char vpn_list[4096];
     char wg_private[64];
     char wg_public[64];
+    int connected; /* corplink.conf was written and wg-quick was brought up */
 } App;
 
 static void app_logf(App *a, const char *fmt, ...) {
@@ -86,6 +87,22 @@ static void sync_api_from_ui(App *a) {
 static void try_fetch_totp_secret(App *a) {
     (void)a;
     app_logf(a, "OTP at Connect is entered from your mobile app.");
+}
+
+static void do_disconnect(App *a) {
+    /* The tunnel itself is a WireGuard interface brought up by
+     * wg-quick, so disconnecting means bringing that interface
+     * down. pkexec shows the graphical password prompt; if it is
+     * not available, run `sudo wg-quick down corplink` in a
+     * terminal instead. */
+    app_logf(a, "Disconnecting — bringing the corplink interface down…");
+    int rc = system("pkexec wg-quick down corplink 2>&1 | head -5");
+    if (rc == 0) {
+        a->connected = 0;
+        app_logf(a, "Disconnected.");
+    } else {
+        app_logf(a, "Disconnect returned %d — if pkexec is missing, run in a terminal: sudo wg-quick down corplink", rc);
+    }
 }
 
 static void do_connect(App *a) {
@@ -137,6 +154,10 @@ static void do_connect(App *a) {
         return;
     }
     app_logf(a, "OTP accepted. Fetching the VPN list to find the gateway to connect to…");
+    /* Cookies can rotate on any authenticated call (e.g. verify),
+     * so re-save the session now — the file written at login may
+     * hold a stale value. */
+    feilian_save_session(&a->api);
     /* 2. GET /api/vpn/list. The list has no "url" field — each
      * node has "ip" + "api_port" (here: 98.98.44.174:11451,
      * vpn_port 11450). /vpn/conn lives on the NODE, not the
@@ -190,6 +211,10 @@ static void do_connect(App *a) {
     }
     const char *conn_base = node_base[0] ? node_base : a->api.server;
     app_logf(a, "Posting /vpn/conn to: %s", conn_base);
+    /* Names only — values are session tokens and never logged. If
+     * the node says "cookies are missing", this shows whether the
+     * jar is empty or a cookie was lost/rotated. */
+    feilian_log_cookie_names(&a->api, a->log, sizeof a->log);
     st = feilian_fetch_peer_otp(&a->api, conn_base, a->wg_public, otp, body, sizeof body);
     app_logf(a, "vpn/conn: HTTP %d", st);
     app_logf(a, "%.800s", body);
@@ -202,6 +227,7 @@ static void do_connect(App *a) {
             const char *path = "corplink.conf";
             feilian_write_wg_conf(path, ip, a->wg_private, peer_key, "", dns, 1420);
             app_logf(a, "Connected — wrote %s, then: sudo wg-quick up %s", path, path);
+            a->connected = 1;
         } else {
             app_logf(a, "Peer info not in the expected shape — see the reply above.");
             app_logf(a, "Public key for this session: %s", a->wg_public);
@@ -364,6 +390,7 @@ int main(void) {
                 cui_text(ui, "Enter the 6-digit OTP from your mobile app — it changes every 30 s.");
                 cui_row(ui, .gap = 8) {
                     if (cui_button(ui, "Connect", .variant = CUI_BUTTON_PRIMARY)) do_connect(&a);
+                    if (cui_button(ui, "Disconnect")) do_disconnect(&a);
                     if (cui_button(ui, "Confirm on mobile app")) {
                         sync_api_from_ui(&a);
                         char body[8192];

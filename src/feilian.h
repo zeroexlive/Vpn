@@ -131,6 +131,11 @@ int feilian_vpn_mfa_verify(feilian_client *c, const char *code,
 int feilian_vpn_mfa_send(feilian_client *c, const char *code_type,
                          char *body, size_t cap);
 
+/* Log the NAMES of the cookies held (never their values). Useful
+ * when a server says "cookies are missing" — it shows whether the
+ * jar is empty or a cookie was rotated away. */
+void feilian_log_cookie_names(feilian_client *c, char *log, size_t cap);
+
 /* Saved login session — cookies only, never the password.
  * File: $HOME/.config/feilian-client/session, mode 0600.
  * Returns 0 on success. Load returns -1 when there is no usable
