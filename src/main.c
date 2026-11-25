@@ -2,7 +2,8 @@
  *
  * Official flow (as the user described it, and as in the 3.2.16 .deb):
  *  1. Company code first. If it resolves, go to login.
- *  2. Email + password. If correct, go to the main layout.
+ *  2. Email + password. No second factor here — SealSuite checks
+ *     them and, if correct, you go to the main layout.
  *  3. Click Connect. The server then asks for MFA, two ways:
  *     a. Enter the 6-digit OTP code from the mobile app
  *        (TOTP, shown in the mobile app as e.g. "617 928"), or
@@ -32,14 +33,11 @@
 
 static const char *OS_NAMES[] = {"Linux", "Windows", "Mac", "Android"};
 static const char *OS_VERSIONS[] = {"2", "2", "2", "2"};
-static const char *MFA_TYPES[] = {"otp", "email", "mobile", "push", "password"};
 
 typedef struct {
     feilian_client api;
     int os_index;
     int stage; /* 0 company, 1 email/password, 2 main layout */
-    int mfa_index;
-    int show_mfa;
     char server[512];
     char company[128];
     char username[128];
@@ -47,7 +45,6 @@ typedef struct {
     char device_name[128];
     char proxy[256];
     char otp[16];
-    char mfa_code[16];
     char log[8192];
     char vpn_list[4096];
     char wg_private[64];
@@ -215,42 +212,13 @@ int main(void) {
                                 a.stage = 2;
                             } else {
                                 app_logf(&a, "Login failed: %.500s", body);
-                                app_logf(&a, "If the server needs a second factor, use the MFA section below.");
-                                a.show_mfa = 1;
+                                app_logf(&a, "Check email / password and try again. There is no second factor at login — MFA is only at Connect.");
                             }
                         } else {
                             app_logf(&a, "Need a server, email and password.");
                         }
                     }
                     if (cui_button(ui, "Back")) a.stage = 0;
-                }
-                if (a.show_mfa) {
-                    cui_text(ui, "Second factor (MFA)");
-                    cui_select(ui, "mfa", MFA_TYPES, 5, &a.mfa_index);
-                    cui_input(ui, "mfa_code", a.mfa_code, sizeof a.mfa_code,
-                              .label = "Code", .placeholder = "6-digit code");
-                    cui_row(ui, .gap = 8) {
-                        if (cui_button(ui, "Send code")) {
-                            sync_api_from_ui(&a);
-                            char body[8192];
-                            int st = feilian_mfa_send(&a.api, MFA_TYPES[a.mfa_index], body, sizeof body);
-                            app_logf(&a, "mfa/send (%s): HTTP %d — %.500s", MFA_TYPES[a.mfa_index], st, body);
-                        }
-                        if (cui_button(ui, "Verify")) {
-                            sync_api_from_ui(&a);
-                            char body[8192];
-                            int st = feilian_mfa_verify(&a.api, MFA_TYPES[a.mfa_index], a.mfa_code, body, sizeof body);
-                            app_logf(&a, "mfa/verify: HTTP %d, code=%d", st, feilian_json_code(body));
-                            if (st == 200 && feilian_json_code(body) == 0) {
-                                app_logf(&a, "MFA verified — logged in as %s.", a.username);
-                                a.api.logged_in = 1;
-                                try_fetch_totp_secret(&a);
-                                a.stage = 2;
-                            } else {
-                                app_logf(&a, "MFA failed: %.500s", body);
-                            }
-                        }
-                    }
                 }
             } else {
                 cui_textf(ui, "Hi, %s", a.username);

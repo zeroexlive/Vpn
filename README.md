@@ -59,9 +59,8 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 1. Choose the OS to report, **before** logging in.
 2. Enter a company code (resolved via `/api/match`) or paste the
    server URL directly, press Next, then enter email and password
-   and press Log in. If the server needs a second factor, pick a
-   type (otp / email / mobile / push / password), Send code, enter
-   the code, Verify.
+   and press Log in. There is no second factor at login — SealSuite
+   checks email/password and, if correct, you go to the main layout.
 3. Main layout: press Connect. Two MFA ways, as in the official app:
    - Enter the 6-digit OTP from your mobile app (e.g. 617928) —
      sent as `"otp"` in `POST /vpn/conn`. If the server returned a
