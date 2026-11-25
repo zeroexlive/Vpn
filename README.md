@@ -33,8 +33,23 @@ corplink-go / corplink-rs clients:
 | Login (password) | `POST {server}/api/v1/login` `{"login_scene": "feilian", "account_type": "email", "account": "…", "password": "<aesEncryptIv(password)>"}` |
 | List VPN | `GET {server}/api/vpn/list` (3.2.16 UI uses the local service `getVpnList`; the endpoint exists — unauthenticated GET answers code 101, not 404) |
 | Connect MFA (OTP) | `POST {server}/api/mfa/code/verify` `{"mfa_scene": "vpn", "code": "…", "code_type": "otp"}` — verify FIRST, then connect. The OTP is never sent to `/vpn/conn`. |
-| Connect MFA (push) | No HTTP endpoint: the official client uses the local corplink-service `sendPushConfirm {scene:"vpn"}`. This client probes `POST /api/mfa/code/send {"mfa_scene":"vpn","code_type":"push"}`. `POST /api/v1/login/mfa/send` with `mfa_type:"push"` is the *login* MFA send and answers `40004 Record not found` at Connect time. |
+| Connect MFA (push) | No HTTP endpoint: the official client uses the local corplink-service `sendPushConfirm {scene:"vpn"}`. `POST /api/mfa/code/send {"mfa_scene":"vpn","code_type":"push"}` answers `1003 Parameter is invalid`, and `POST /api/v1/login/mfa/send` with `mfa_type:"push"` is the *login* MFA send and answers `40004 Record not found` at Connect time. Use the OTP field. |
 | Fetch WireGuard peer | `POST {node url from the list}/vpn/conn` `{"public_key": "…", "otp": "…"}` — the old corplink-go path. Posting it to the *portal* (`ourbit.sealsuite.com`) gives HTTP 404, because `/vpn/conn` does not exist there. 3.2.16 UI uses the local service `connectVpn` instead. |
+
+**Saved session:** after a successful login the client saves the
+server, username and session cookies (never the password) to
+`~/.config/feilian-client/session` (mode 0600). The next run
+opens straight on the main layout, no login needed. Any
+authenticated call that answers code 101 "login status is
+invalid" means the session expired — the file is deleted and
+the login screen comes back. **Log out** clears the file.
+
+**Reading the log:** a transport failure prints `HTTP -1` and
+the reason (`last_error`, e.g. DNS / TLS / proxy). The reply
+body is empty in that case — `feilian_https` clears it on
+every call, so a body shown after `HTTP -1` used to be a stale
+reply from the previous call (that is how a `1003` from the
+push probe once looked like the verify reply).
 | Keep-alive / disconnect | `POST {server}/vpn/report` |
 
 The reply to login is a double envelope: outer `code`, inner

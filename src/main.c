@@ -116,7 +116,22 @@ static void do_connect(App *a) {
      * (HTTP 404), so even a correct OTP "didn't work". */
     int st = feilian_vpn_mfa_verify(&a->api, otp, "otp", body, sizeof body);
     app_logf(a, "mfa/code/verify: HTTP %d", st);
+    if (st == -1) {
+        /* Transport failure — last_error says why. The body is
+         * empty here (feilian_https clears it), never a stale
+         * reply from an earlier call. */
+        app_logf(a, "Could not reach the server: %s", a->api.last_error);
+        app_logf(a, "Check your network / proxy and try again — the OTP was not checked yet.");
+        return;
+    }
     app_logf(a, "%.800s", body);
+    if (feilian_json_code(body) == 101) {
+        app_logf(a, "Session expired (code 101) — log in again.");
+        feilian_clear_session();
+        a->api.logged_in = 0;
+        a->stage = 0;
+        return;
+    }
     if (!(st == 200 && feilian_json_code(body) == 0)) {
         app_logf(a, "OTP not accepted by the server — get a fresh code from your mobile app (it changes every 30 s) and try again.");
         return;
@@ -175,6 +190,16 @@ int main(void) {
     strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
     feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only.");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
+    /* Restore a saved login session, if there is one — the official
+     * client also stays logged in across restarts. A saved session
+     * is validated by the first authenticated call (code 101 means
+     * it expired and the login screen comes back). */
+    if (feilian_load_session(&a.api) == 0) {
+        strncpy(a.server, a.api.server, sizeof a.server - 1);
+        strncpy(a.username, a.api.username, sizeof a.username - 1);
+        a.stage = 2;
+        feilian_log(a.log, sizeof a.log, "Restored saved session for %s — no login needed.", a.username);
+    }
 
     cui_app *app = cui_app_create(&(cui_app_desc){
         .title = "FeiLian Client", .width = 720, .height = 640});
@@ -250,6 +275,10 @@ int main(void) {
                                      * means "password changed, continue"). */
                                     app_logf(&a, "Logged in as %s.", a.username);
                                     a.api.logged_in = 1;
+                                    if (feilian_save_session(&a.api) == 0)
+                                        app_logf(&a, "Session saved — next time the app opens already logged in (Log out clears it).");
+                                    else
+                                        app_logf(&a, "Note: could not save the session, you will need to log in again next time.");
                                     memset(a.password, 0, sizeof a.password);
                                     try_fetch_totp_secret(&a);
                                     a.stage = 2;
@@ -312,19 +341,14 @@ int main(void) {
                         int st = feilian_mfa_type(&a.api, body, sizeof body);
                         app_logf(&a, "mfa/type: HTTP %d — %.500s", st, body);
                         if (st == 200 && strstr(body, "push")) {
-                            /* The official client sends push via the
-                             * local corplink-service (sendPushConfirm
-                             * {scene:"vpn"}), not over HTTP — the
-                             * earlier call to the LOGIN mfa/send
-                             * answered 40004 "Record not found".
-                             * Probe the VPN code/send shape instead;
-                             * if it fails, use the OTP field. */
-                            st = feilian_vpn_mfa_send(&a.api, "push", body, sizeof body);
-                            app_logf(&a, "mfa/code/send (push): HTTP %d — %.500s", st, body);
-                            if (st == 200 && feilian_json_code(body) == 0)
-                                app_logf(&a, "Push sent — approve it on your mobile app, then press Connect.");
-                            else
-                                app_logf(&a, "Push could not be sent from this client — enter the 6-digit OTP from your mobile app instead.");
+                            /* Push confirm goes through the official
+                             * client's local service (sendPushConfirm
+                             * {scene:"vpn"}) — there is no HTTP push
+                             * endpoint in this client. The VPN
+                             * code/send endpoint answers 1003
+                             * "Parameter is invalid" for code_type
+                             * push, so don't call it. Use the OTP. */
+                            app_logf(&a, "Push confirm is sent by the official client's local service, not over HTTP — this client can't trigger it. Enter the 6-digit OTP from your mobile app instead.");
                         } else {
                             app_logf(&a, "This server did not offer push confirm — enter the OTP code instead.");
                         }
@@ -336,12 +360,20 @@ int main(void) {
                         app_logf(&a, "vpn/list: HTTP %d", st);
                         strncpy(a.vpn_list, body, sizeof a.vpn_list - 1);
                         app_logf(&a, "%.800s", body);
+                        if (st == 200 && feilian_json_code(body) == 101) {
+                            app_logf(&a, "Session expired (code 101) — log in again.");
+                            feilian_clear_session();
+                            a.api.logged_in = 0;
+                            a.stage = 0;
+                        }
                     }
                     if (cui_button(ui, "Log out")) {
+                        feilian_clear_session();
                         a.stage = 0; a.api.logged_in = 0;
                         memset(a.password, 0, sizeof a.password);
                         memset(a.otp, 0, sizeof a.otp);
-                        app_logf(&a, "Logged out.");
+                        a.api.cookies[0] = '\0';
+                        app_logf(&a, "Logged out — saved session cleared.");
                     }
                 }
             }

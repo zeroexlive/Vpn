@@ -6,6 +6,7 @@
 #include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -286,6 +287,10 @@ static int connect_via_proxy(const char *host, int port, char *err, size_t err_c
 
 int feilian_https(feilian_client *c, const char *method, const char *url,
                   const char *json_body, char *body, size_t cap) {
+    /* Always clear the reply first: on a transport failure (-1) the
+     * caller must never see the previous call's body. (A stale
+     * 1003 from the push probe was once shown as the verify reply.) */
+    if (body && cap) body[0] = '\0';
     if (strncmp(url, "https://", 8) != 0) return -1;
     const char *host_start = url + 8;
     const char *path = strchr(host_start, '/');
@@ -359,6 +364,10 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     n += snprintf(req + n, sizeof req - (size_t)n, "Connection: close\r\n\r\n");
     if (json_body)
         n += snprintf(req + n, sizeof req - (size_t)n, "%s", json_body);
+    /* snprintf returns the would-be length when truncated; never
+     * hand SSL_write a length past the buffer. */
+    if (n > (int)sizeof req - 1) n = (int)sizeof req - 1;
+    if (n < 0) n = 0;
     SSL_write(ssl, req, n);
 
     /* Read everything, split headers/body on \r\n\r\n. */
@@ -746,4 +755,89 @@ int feilian_write_wg_conf(const char *path, const char *address,
             peer_key, endpoint);
     fclose(f);
     return 0;
+}
+
+/* ---- Saved login session -------------------------------------------
+ * After a successful login the server's session lives in the cookies
+ * accumulated in c->cookies. Save them to disk so the next run opens
+ * already logged in, like the official client (which keeps its
+ * session in the local service / safe storage). The file holds session
+ * tokens, so it is written mode 0600 under
+ * $HOME/.config/feilian-client/session. No password is ever saved.
+ * Format: one key=value line per field; values never contain '\n'.
+ * On load, the caller validates the session with any authenticated
+ * call — the server answers code 101 "login status is invalid"
+ * when it has expired, and the caller then clears the file and
+ * shows the login screen. */
+static int session_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return -1;
+    snprintf(out, cap, "%s/.config/feilian-client/session", home);
+    return 0;
+}
+
+int feilian_save_session(feilian_client *c) {
+    char path[1024];
+    if (session_path(path, sizeof path) != 0) return -1;
+    char dir[1024], parent[1024];
+    snprintf(parent, sizeof parent, "%s/.config", getenv("HOME"));
+    snprintf(dir, sizeof dir, "%s/.config/feilian-client", getenv("HOME"));
+    mkdir(parent, 0700);
+    mkdir(dir, 0700);
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    chmod(path, 0600);
+    fprintf(f, "server=%s\nusername=%s\ncookies=%s\nenable_self_signed=%d\n",
+            c->server, c->username, c->cookies, c->enable_self_signed);
+    if (c->self_signed_cert[0]) {
+        /* PEM contains newlines — store it base64-free by escaping them. */
+        fprintf(f, "self_signed_cert=");
+        for (const char *p = c->self_signed_cert; *p; p++) {
+            if (*p == '\n') fputs("\\n", f);
+            else fputc(*p, f);
+        }
+        fputc('\n', f);
+    }
+    fclose(f);
+    return 0;
+}
+
+int feilian_load_session(feilian_client *c) {
+    char path[1024];
+    if (session_path(path, sizeof path) != 0) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[12288];
+    memset(c->cookies, 0, sizeof c->cookies);
+    c->self_signed_cert[0] = '\0';
+    while (fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        const char *v = eq + 1;
+        if (strcmp(line, "server") == 0) strncpy(c->server, v, sizeof c->server - 1);
+        else if (strcmp(line, "username") == 0) strncpy(c->username, v, sizeof c->username - 1);
+        else if (strcmp(line, "cookies") == 0) strncpy(c->cookies, v, sizeof c->cookies - 1);
+        else if (strcmp(line, "enable_self_signed") == 0) c->enable_self_signed = atoi(v);
+        else if (strcmp(line, "self_signed_cert") == 0) {
+            char *d = c->self_signed_cert;
+            size_t left = sizeof c->self_signed_cert - 1;
+            for (const char *p = v; *p && left; p++) {
+                if (p[0] == '\\' && p[1] == 'n') { *d++ = '\n'; left--; p++; }
+                else { *d++ = *p; left--; }
+            }
+            *d = '\0';
+        }
+    }
+    fclose(f);
+    if (!c->server[0] || !c->cookies[0]) return -1;
+    c->logged_in = 1;
+    return 0;
+}
+
+int feilian_clear_session(void) {
+    char path[1024];
+    if (session_path(path, sizeof path) != 0) return -1;
+    return unlink(path);
 }

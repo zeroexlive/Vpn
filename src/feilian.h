@@ -131,8 +131,14 @@ int feilian_vpn_mfa_verify(feilian_client *c, const char *code,
 int feilian_vpn_mfa_send(feilian_client *c, const char *code_type,
                          char *body, size_t cap);
 
-/* Curve25519 WireGuard keypair, clamped as WireGuard requires.
- * private_b64 / public_b64 are base64, 44 chars + NUL. */
+/* Saved login session — cookies only, never the password.
+ * File: $HOME/.config/feilian-client/session, mode 0600.
+ * Returns 0 on success. Load returns -1 when there is no usable
+ * saved session; a loaded session must still be validated by the
+ * caller (server answers code 101 when it has expired). */
+int feilian_save_session(feilian_client *c);
+int feilian_load_session(feilian_client *c);
+int feilian_clear_session(void);
 int feilian_gen_wg_keypair(char *private_b64, size_t priv_cap,
                            char *public_b64, size_t pub_cap);
 
