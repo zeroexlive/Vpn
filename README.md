@@ -86,6 +86,20 @@ cmake --build build -j
 ./build/feilian-client
 ```
 
+To update to the latest pushed version: `git pull`, then rebuild.
+If `git pull` fails with "diverging branches", reset to the remote
+— everything is already pushed, nothing is lost:
+
+```sh
+git fetch origin
+git reset --hard origin/main
+cmake --build build -j
+```
+
+The log at the top of the app window shows the build version (e.g.
+`build v14`), so you can confirm you are running the latest one
+before retrying a Connect.
+
 Needs a C99 compiler, CMake ≥ 3.14, OpenSSL dev headers, and on
 Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
