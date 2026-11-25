@@ -30,7 +30,8 @@
  */
 
 #define FEILIAN_MATCH_URL "https://corplink.volcengine.cn/api/match"
-#define FEILIAN_USER_AGENT "CorpLink/201000 (Linux; en)"
+/* Same UA as the public corplink-go client — the server/WAF accepts it. */
+#define FEILIAN_USER_AGENT "CorpLink/201000 (GooglePixel; Android 10; en)"
 
 typedef struct {
     char server[512];      /* e.g. https://xxx.feilian.volcengine.cn, from /api/match */

@@ -69,10 +69,21 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
 ## Status / limits
 
-- v1: UI, login, list, peer fetch, WireGuard config writing.
+- v2: company lookup fixed — the `/api/match` reply carries the
+  server in `data.domain` (not `url`), the client now uses the
+  corplink-go User-Agent, honours `https_proxy`/`HTTPS_PROXY`
+  (CONNECT tunnel) for proxied networks, and shows the server's
+  full reply body on a lookup failure instead of just the HTTP code.
+  A wrong company code returns HTTP 200 with code 1005
+  ("The enterprise identification code does not exist"); a 403
+  means the request was blocked before lookup (WAF / proxy / IP
+  geo-block), not a wrong code. Workaround: paste the server URL
+  directly (e.g. `https://<name>.ifeilian.cn:443`) to skip `/api/match`.
 - Not yet: automatic `wg-quick` bring-up (needs root + `wg` on the
   target), keep-alive reporting (`/vpn/report`), MFA / email-code /
-  TOTP login flows, LDAP / Lark / OIDC platforms.
+  TOTP login flows, LDAP / Lark / OIDC platforms. The official UI
+  (see screenshot) shows a One-Time Password, so deployments with
+  MFA will need the OTP step after password login.
 - The peer reply is nested JSON; the top-level field extraction in
   `src/main.c` is best-effort — if your server's shape differs, paste
   the logged `/vpn/conn` reply and the parser can be adjusted to it.
