@@ -545,10 +545,13 @@ int feilian_login_password(feilian_client *c, const char *password,
     if (st == 200 && feilian_json_code(body) == 0) {
         char action[64] = "";
         if (feilian_next_action(body, action, sizeof action) == 0 &&
-            strcmp(action, "main") == 0)
+            (strcmp(action, "main") == 0 || strcmp(action, "GoToLink") == 0))
             c->logged_in = 1;
         /* next.action == "2FA" / "ChangeInitPassword" / etc. is NOT
-         * a plain success — the caller must route on it. */
+         * a plain success — the caller must route on it.
+         * GoToLink (no link, or link != "LoginPage") means the
+         * official client calls handleLoginDone and goes to the
+         * main layout; link == "LoginPage" also ends at main. */
     }
     memset(payload, 0, sizeof payload);
     memset(pw, 0, sizeof pw);

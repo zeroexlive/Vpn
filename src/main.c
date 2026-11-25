@@ -5,6 +5,9 @@
  *  2. Email + password. No second factor here — SealSuite checks
  *     them and, if correct, you go to the main layout.
  *  3. Click Connect. The server then asks for MFA, two ways:
+ *     - type the 6-digit OTP from the mobile app (sent as "otp"
+ *       in /vpn/conn), or
+ *     - tap "Confirm on mobile app" (push, /api/mfa/type + send).
  *     a. Enter the 6-digit OTP code from the mobile app
  *        (TOTP, shown in the mobile app as e.g. "617 928"), or
  *     b. Confirm on the mobile app (push authentication).
@@ -199,7 +202,11 @@ int main(void) {
                                 char action[64] = "";
                                 feilian_next_action(body, action, sizeof action);
                                 app_logf(&a, "login next.action: %s", action[0] ? action : "(none)");
-                                if (action[0] == '\0' || strcmp(action, "main") == 0) {
+                                if (action[0] == '\0' || strcmp(action, "main") == 0 || strcmp(action, "GoToLink") == 0) {
+                                    /* GoToLink: the official client calls
+                                     * handleLoginDone and goes to the main
+                                     * layout (link == "LoginPage" just
+                                     * means "password changed, continue"). */
                                     app_logf(&a, "Logged in as %s.", a.username);
                                     a.api.logged_in = 1;
                                     memset(a.password, 0, sizeof a.password);
