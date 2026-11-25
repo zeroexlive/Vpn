@@ -45,6 +45,7 @@ typedef struct {
     char username[128];
     char password[128];
     char device_name[128];
+    char proxy[256];
     char otp[16];
     char mfa_code[16];
     char log[8192];
@@ -69,6 +70,9 @@ static void sync_api_from_ui(App *a) {
     strncpy(a->api.device_name, a->device_name, sizeof a->api.device_name - 1);
     strncpy(a->api.os, OS_NAMES[a->os_index], sizeof a->api.os - 1);
     strncpy(a->api.os_version, OS_VERSIONS[a->os_index], sizeof a->api.os_version - 1);
+    /* Proxy from the UI, if the user filled it in — otherwise the
+     * https_proxy / HTTPS_PROXY environment variable is used. */
+    if (a->proxy[0]) setenv("https_proxy", a->proxy, 1);
 }
 
 /* After a successful password login, try to fetch the TOTP secret so
@@ -165,6 +169,9 @@ int main(void) {
                 cui_input(ui, "company", a.company, sizeof a.company,
                           .label = "Company code",
                           .placeholder = "company code");
+                cui_input(ui, "proxy", a.proxy, sizeof a.proxy,
+                          .label = "Proxy (optional, only if your network needs one)",
+                          .placeholder = "http://user:pass@proxy:3128");
                 if (cui_button(ui, "Next", .variant = CUI_BUTTON_PRIMARY)) {
                     sync_api_from_ui(&a);
                     if (!a.api.server[0] && a.api.company[0]) {

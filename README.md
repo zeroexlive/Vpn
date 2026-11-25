@@ -93,11 +93,27 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
   means the request was blocked before lookup (WAF / proxy / IP
   geo-block), not a wrong code. Workaround: paste the server URL
   directly (e.g. `https://<name>.ifeilian.cn:443`) to skip `/api/match`.
+- v4: "HTTP -1" is now a plain-English transport error instead of a
+  bare code, with 10 s connect / 15 s read timeouts (it used to hang
+  for minutes). E.g. "TLS handshake failed to corplink.volcengine.cn
+  — server may require a proxy, or TLS is blocked", "DNS lookup
+  failed", "TCP connect timed out", "proxy refused CONNECT".
+  There is also a Proxy field on the first screen
+  (`http://user:pass@proxy:3128`); otherwise `https_proxy` from the
+  environment is used. If you get a TLS/connect error, first test
+  in a terminal:
+  `curl -X POST https://corplink.volcengine.cn/api/match -H 'Content-Type: application/json' -d '{"code":"test"}'`
+  — if curl fails too, the network blocks the server; if curl works
+  but the client does not, launch the client from that same terminal
+  so it inherits the proxy settings.
+- v3: staged UI (company → email/password → main layout), OTP at
+  Connect (`"otp"` in `/vpn/conn`), TOTP generation from
+  `/api/v2/p/otp`, login MFA (`/api/v1/login/mfa/send` +
+  `/verify`, types otp/email/mobile/push/password), push confirm
+  via `/api/mfa/type` + `mfa/send push`.
 - Not yet: automatic `wg-quick` bring-up (needs root + `wg` on the
-  target), keep-alive reporting (`/vpn/report`), MFA / email-code /
-  TOTP login flows, LDAP / Lark / OIDC platforms. The official UI
-  (see screenshot) shows a One-Time Password, so deployments with
-  MFA will need the OTP step after password login.
+  target), keep-alive reporting (`/vpn/report`), LDAP / Lark / OIDC
+  platforms.
 - The peer reply is nested JSON; the top-level field extraction in
   `src/main.c` is best-effort — if your server's shape differs, paste
   the logged `/vpn/conn` reply and the parser can be adjusted to it.

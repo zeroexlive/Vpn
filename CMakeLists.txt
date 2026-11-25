@@ -10,10 +10,17 @@ endif()
 
 # CUI — MIT, https://github.com/yappologistic/CUI.git
 # Pinned to the release the cloned copy in ~/workspace/CUI documents (1.5.0).
+# GIT_SHALLOW: only fetch the v1.5.0 tag, not the whole history —
+# a full clone is ~75 MB and CMake shows no progress while it
+# downloads, which looks like it is stuck after
+# "Detecting C compile features - done".
+# If you already have CUI cloned locally, skip the download entirely:
+#   cmake -S . -B build -DFETCHCONTENT_SOURCE_DIR_CUI=/path/to/CUI
 include(FetchContent)
 FetchContent_Declare(cui
   GIT_REPOSITORY https://github.com/yappologistic/CUI.git
-  GIT_TAG v1.5.0)
+  GIT_TAG v1.5.0
+  GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(cui)
 
 find_package(OpenSSL REQUIRED)

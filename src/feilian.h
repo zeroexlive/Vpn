@@ -43,6 +43,7 @@ typedef struct {
     char cookies[4096];    /* Cookie: header value, accumulated from Set-Cookie */
     char totp_secret[128]; /* base32 TOTP secret from /api/v2/p/otp, if any */
     long date_offset_sec;  /* server Date minus local time, for TOTP */
+    char last_error[512];  /* set by feilian_https on transport failure */
     int logged_in;
 } feilian_client;
 

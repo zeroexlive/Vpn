@@ -4,6 +4,8 @@
 
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <openssl/rand.h>
@@ -89,33 +91,64 @@ static void accumulate_cookies(feilian_client *c, const char *headers) {
     }
 }
 
-/* Plain TCP connect, no TLS. Returns fd or -1. */
-static int connect_host(const char *host, int port) {
-    struct addrinfo hints = {0}, *res = NULL;
+/* Plain TCP connect, no TLS. 10 s timeout, tries every resolved
+ * address. Returns fd or -1, with *err set to a plain-English reason. */
+static int connect_host(const char *host, int port, char *err, size_t err_cap) {
+    struct addrinfo hints = {0}, *res = NULL, *ai;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     char port_s[16];
     snprintf(port_s, sizeof port_s, "%d", port);
-    if (getaddrinfo(host, port_s, &hints, &res) != 0) return -1;
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    if (fd < 0) { freeaddrinfo(res); return -1; }
-    if (connect(fd, res->ai_addr, res->ai_addrlen) != 0) {
-        close(fd); freeaddrinfo(res); return -1;
+    if (getaddrinfo(host, port_s, &hints, &res) != 0) {
+        snprintf(err, err_cap, "DNS lookup failed for %s — check internet / DNS", host);
+        return -1;
+    }
+    int last_errno = 0;
+    for (ai = res; ai; ai = ai->ai_next) {
+        int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) { last_errno = errno; continue; }
+        int flags = fcntl(fd, F_GETFL, 0);
+        fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
+        if (rc != 0 && errno == EINPROGRESS) {
+            fd_set wf; FD_ZERO(&wf); FD_SET(fd, &wf);
+            struct timeval tv = {10, 0};
+            rc = select(fd + 1, NULL, &wf, NULL, &tv);
+            if (rc > 0) {
+                int so_err = 0; socklen_t sl = sizeof so_err;
+                getsockopt(fd, SOL_SOCKET, SO_ERROR, &so_err, &sl);
+                if (so_err == 0) rc = 0; else { errno = so_err; rc = -1; }
+            } else if (rc == 0) { errno = ETIMEDOUT; rc = -1; }
+        }
+        if (rc == 0) {
+            fcntl(fd, F_SETFL, flags);
+            struct timeval tv = {15, 0};
+            setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+            freeaddrinfo(res);
+            return fd;
+        }
+        last_errno = errno;
+        close(fd);
     }
     freeaddrinfo(res);
-    return fd;
+    if (last_errno == ETIMEDOUT)
+        snprintf(err, err_cap, "TCP connect to %s:%d timed out after 10 s — server/proxy unreachable or blocked", host, port);
+    else
+        snprintf(err, err_cap, "TCP connect to %s:%d failed: %s — check internet, firewall, or proxy", host, port, strerror(last_errno));
+    return -1;
 }
 
 /* If https_proxy/HTTPS_PROXY is set, tunnel through it with CONNECT.
  * Returns a connected fd (to the target, via proxy) or -1. */
-static int connect_via_proxy(const char *host, int port) {
+static int connect_via_proxy(const char *host, int port, char *err, size_t err_cap) {
     const char *proxy = getenv("https_proxy");
     if (!proxy || !proxy[0]) proxy = getenv("HTTPS_PROXY");
     if (!proxy || !proxy[0]) proxy = getenv("http_proxy");
     if (!proxy || !proxy[0]) proxy = getenv("HTTP_PROXY");
     if (!proxy || !proxy[0]) return -1;
-    if (strncmp(proxy, "http://", 7) != 0) return -1;
-    const char *p = proxy + 7;
+    if (strncmp(proxy, "http://", 7) != 0 && strncmp(proxy, "https://", 8) != 0) return -1;
+    const char *p = strstr(proxy, "://") + 3;
     char auth[512] = "";
     const char *at = strchr(p, '@');
     const char *hostport = p;
@@ -137,8 +170,9 @@ static int connect_via_proxy(const char *host, int port) {
     if (hlen >= sizeof phost) return -1;
     memcpy(phost, hostport, hlen); phost[hlen] = '\0';
 
-    int fd = connect_host(phost, pport);
-    if (fd < 0) return -1;
+    char perr[512] = "";
+    int fd = connect_host(phost, pport, perr, sizeof perr);
+    if (fd < 0) { snprintf(err, err_cap, "proxy %s:%d unreachable: %s", phost, pport, perr); return -1; }
     char req[1024];
     int n = snprintf(req, sizeof req,
         "CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n", host, port, host, port);
@@ -164,7 +198,10 @@ static int connect_via_proxy(const char *host, int port) {
     }
     int status = 0;
     sscanf(buf, "HTTP/%*s %d", &status);
-    if (status != 200) { close(fd); return -1; }
+    if (status != 200) {
+        snprintf(err, err_cap, "proxy refused CONNECT to %s:%d, proxy replied HTTP %d — check proxy / credentials", host, port, status);
+        close(fd); return -1;
+    }
     return fd;
 }
 
@@ -186,8 +223,16 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     memcpy(host, host_start, host_len);
     host[host_len] = '\0';
 
-    int fd = connect_via_proxy(host, port);
-    if (fd < 0) fd = connect_host(host, port);
+    c->last_error[0] = '\0';
+    char conn_err[512] = "";
+    int fd = connect_via_proxy(host, port, conn_err, sizeof conn_err);
+    if (fd < 0) {
+        if (conn_err[0]) {
+            strncpy(c->last_error, conn_err, sizeof c->last_error - 1);
+            return -1;
+        }
+        fd = connect_host(host, port, c->last_error, sizeof c->last_error);
+    }
     if (fd < 0) return -1;
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
@@ -196,6 +241,8 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     SSL_set_tlsext_host_name(ssl, host);
     SSL_set_alpn_protos(ssl, (unsigned char *)"\x08http/1.1", 9);
     if (SSL_connect(ssl) != 1) {
+        snprintf(c->last_error, sizeof c->last_error,
+                 "TLS handshake failed to %s — server may require a proxy, or TLS is blocked", host);
         SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return -1;
     }
 
@@ -292,7 +339,14 @@ int feilian_match_company(feilian_client *c, char *err, size_t err_cap) {
     feilian_client tmp = *c;
     tmp.cookies[0] = '\0';
     int st = feilian_https(&tmp, "POST", FEILIAN_MATCH_URL, payload, body, sizeof body);
-    if (st != 200) { snprintf(err, err_cap, "match: HTTP %d: %.200s", st, body); return -1; }
+    if (st != 200) {
+        if (st == -1)
+            snprintf(err, err_cap, "match: %s", tmp.last_error[0] ? tmp.last_error : "no response from server");
+        else
+            snprintf(err, err_cap, "match: HTTP %d: %.200s", st, body);
+        strncpy(c->last_error, tmp.last_error, sizeof c->last_error - 1);
+        return -1;
+    }
     if (feilian_json_code(body) != 0) {
         char msg[256] = "";
         feilian_json_string(body, "message", msg, sizeof msg);
