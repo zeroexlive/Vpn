@@ -9,6 +9,8 @@
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/md5.h>
+#include <openssl/sha.h>
 #include <openssl/x509.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
@@ -32,6 +34,56 @@ void feilian_log(char *log, size_t cap, const char *fmt, ...) {
     if (len + strlen(tmp) + 2 >= cap) return;
     strcat(log, tmp);
     strcat(log, "\n");
+}
+
+/* AES password encryption, as used by the SealSuite web portal
+ * (portal 3.3.14, module 90949) and the official client's
+ * aesEncryptIv — verified against the user's server:
+ * plain password -> 40000 "Parameter is invalid",
+ * this encryption -> 10110001 "user name or password is incorrect"
+ * for a dummy account, i.e. a valid parameter.
+ *
+ *   key_str = MD5("9007199254740991") as lowercase hex (32 chars)
+ *   key     = UTF-8 bytes of key_str (32 bytes -> AES-256)
+ *   iv      = first 16 chars of SHA1(key_str) hex, as ASCII
+ *   cipher  = AES-256-CBC, PKCS#7, output lowercase hex
+ * No IV is prepended; the output is deterministic. */
+int feilian_aes_encrypt_password(const char *password, char *out_hex, size_t cap) {
+    unsigned char md5d[MD5_DIGEST_LENGTH];
+    MD5((const unsigned char *)"9007199254740991", 16, md5d);
+    char key_str[33];
+    for (int i = 0; i < MD5_DIGEST_LENGTH; i++)
+        snprintf(key_str + i * 2, 3, "%02x", md5d[i]);
+    key_str[32] = '\0';
+    unsigned char sha1d[SHA_DIGEST_LENGTH];
+    SHA1((const unsigned char *)key_str, 32, sha1d);
+    char sha1_hex[41];
+    for (int i = 0; i < SHA_DIGEST_LENGTH; i++)
+        snprintf(sha1_hex + i * 2, 3, "%02x", sha1d[i]);
+    sha1_hex[40] = '\0';
+    unsigned char iv[16];
+    memcpy(iv, sha1_hex, 16); /* first 16 ASCII chars of SHA1 hex */
+    size_t plen = strlen(password);
+    size_t need = (plen / 16 + 1) * 32 + 1; /* hex of padded blocks */
+    if (cap < need) return -1;
+    EVP_CIPHER_CTX *ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) return -1;
+    int outlen = 0, tmplen = 0;
+    unsigned char *ct = malloc((plen / 16 + 1) * 16);
+    if (!ct) { EVP_CIPHER_CTX_free(ctx); return -1; }
+    int ok = EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL,
+                                (const unsigned char *)key_str, iv) == 1 &&
+             EVP_EncryptUpdate(ctx, ct, &outlen,
+                               (const unsigned char *)password, (int)plen) == 1 &&
+             EVP_EncryptFinal_ex(ctx, ct + outlen, &tmplen) == 1;
+    EVP_CIPHER_CTX_free(ctx);
+    if (!ok) { free(ct); return -1; }
+    outlen += tmplen;
+    for (int i = 0; i < outlen; i++)
+        snprintf(out_hex + i * 2, 3, "%02x", ct[i]);
+    out_hex[outlen * 2] = '\0';
+    free(ct);
+    return 0;
 }
 
 void feilian_sha256_hex(const char *input, char *out_hex) {
@@ -464,13 +516,11 @@ int feilian_login_password(feilian_client *c, const char *password,
     /* 3.2.16: POST /api/v1/login, no query params.
      * {"login_scene":"feilian","account_type":"email",
      *  "account":"<email>","password":"<aesEncryptIv(password)>"}
-     * The AES transform lives in the official client's native
-     * preload module and its key/IV are not recoverable from the
-     * .deb by string inspection. This build sends the trimmed
-     * password plain and logs the server's exact reply, so the
-     * error will tell us if AES is enforced (decrypt/format error)
-     * or if plain is accepted. Do NOT send SHA-256 here — the
-     * server would never match it against an AES-decrypted value. */
+     * The encryption is the portal's aesEncrypt (see
+     * feilian_aes_encrypt_password): MD5/SHA1-derived fixed
+     * key/IV, AES-256-CBC, hex output. Verified against the
+     * user's server — plain is rejected with 40000, this is
+     * accepted as a parameter (10110001 for a dummy account). */
     char pw[256];
     /* Trim leading/trailing whitespace only — keep inner spaces. */
     strncpy(pw, password, sizeof pw - 1); pw[sizeof pw - 1] = '\0';
@@ -478,11 +528,16 @@ int feilian_login_password(feilian_client *c, const char *password,
     while (n > 0 && (pw[n - 1] == ' ' || pw[n - 1] == '\t' || pw[n - 1] == '\n' || pw[n - 1] == '\r')) pw[--n] = '\0';
     char *s = pw;
     while (*s == ' ' || *s == '\t') s++;
-    char payload[1024], url[1024];
+    char pw_hex[1024];
+    if (feilian_aes_encrypt_password(s, pw_hex, sizeof pw_hex) != 0) {
+        snprintf(body, cap, "{\"code\":-1,\"message\":\"AES encryption failed\"}");
+        return -1;
+    }
+    char payload[2048], url[1024];
     const char *atype = strchr(c->username, '@') ? "email" : "email";
     snprintf(payload, sizeof payload,
              "{\"login_scene\":\"feilian\",\"account_type\":\"%s\",\"account\":\"%s\",\"password\":\"%s\"}",
-             atype, c->username, s);
+             atype, c->username, pw_hex);
     size_t sl = strlen(c->server);
     while (sl > 0 && c->server[sl - 1] == '/') sl--;
     snprintf(url, sizeof url, "%.*s/api/v1/login", (int)sl, c->server);
@@ -554,10 +609,10 @@ int feilian_mfa_send(feilian_client *c, const char *mfa_type,
 
 int feilian_mfa_verify(feilian_client *c, const char *mfa_type,
                        const char *code, char *body, size_t cap) {
-    char payload[1024], url[1024];
+    char payload[2048], url[1024];
     if (strcmp(mfa_type, "password") == 0) {
-        char pw_hex[65];
-        feilian_sha256_hex(code, pw_hex);
+        char pw_hex[1024];
+        feilian_aes_encrypt_password(code, pw_hex, sizeof pw_hex);
         snprintf(payload, sizeof payload,
                  "{\"mfa_type\":\"password\",\"login_scene\":\"feilian\",\"account\":\"%s\",\"password\":\"%s\",\"code\":\"\"}",
                  c->username, pw_hex);

@@ -44,19 +44,19 @@ a failure.
 
 **Password encryption:** the server's setting says
 `"password_encrypted":true`, and the official client encrypts
-with `aesEncryptIv` from its native preload bridge. That function
-lives in the packed native module `Common.Build-*.node` (its ELF
-header is obfuscated and it is loaded/decrypted by
-`linuxx64.node`'s loader), so the AES key/IV are not recoverable
-by static inspection. This client sends the trimmed password
-plain and logs the server's reply verbatim. On the test server
-(`test.ifeilian.cn`) that is accepted as a parameter — a dummy
-password gives code `10110001` "user name or password is
-incorrect", not a parameter/decrypt error — so plain may work,
-or the server may be treating the plain text as a failed
-decrypt. If a correct password still gives `10110001`, AES is
-enforced and the key must be recovered by running the official
-bridge, not by reading the .deb.
+with `aesEncryptIv` / the portal's `aesEncrypt`. The algorithm
+is in the portal's public web JS (portal 3.3.14, module 90949),
+not hidden in the native module:
+`key = MD5("9007199254740991")` as hex (32 chars, UTF-8 =
+AES-256 key), `iv = first 16 chars of SHA1(key)` as ASCII,
+AES-256-CBC with PKCS#7, output lowercase hex, no IV
+prepended. This client implements exactly that
+(`feilian_aes_encrypt_password`). Verified: a plain password
+is rejected by `ourbit.sealsuite.com` with `40000 Parameter
+is invalid`, while this encryption is accepted as a parameter
+(`10110001` "user name or password is incorrect" for a dummy
+account). The native bridge's `aesEncryptIv` produces the
+same deterministic hex format.
 
 The OS picker is kept for the legacy endpoints that still take
 `os`/`os_version`; the 3.2.16 login calls take no `os` param.

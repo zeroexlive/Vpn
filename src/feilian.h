@@ -70,12 +70,18 @@ int feilian_login_setting(feilian_client *c, char *body, size_t cap);
 /* POST /api/v1/login — 3.2.16 official flow:
  * {"login_scene":"feilian","account_type":"email",
  *  "account":"<email>","password":"<aesEncryptIv(password)>"}
- * AES key/IV are in the official client's native module and are not
- * recoverable from the .deb by inspection, so this build sends the
- * trimmed password plain and logs the server's reply verbatim —
- * that reply is the probe that tells us if AES is enforced. */
+ * The encryption is the SealSuite portal's aesEncrypt (see
+ * feilian_aes_encrypt_password in feilian.c): fixed key/IV
+ * derived from Number.MAX_SAFE_INTEGER, AES-256-CBC, hex.
+ * Verified against the user's server — plain is rejected
+ * with 40000, this is accepted as a parameter. */
 int feilian_login_password(feilian_client *c, const char *password,
                            char *body, size_t cap);
+
+/* AES-encrypt a password the way the portal / official client
+ * does (aesEncrypt / aesEncryptIv). Returns 0 on success,
+ * out_hex is lowercase hex, no IV prepended. */
+int feilian_aes_encrypt_password(const char *password, char *out_hex, size_t cap);
 
 /* Read data.next.action from the double-envelope login reply
  * (outer code, inner data is a JSON string). Returns 0 on success. */
