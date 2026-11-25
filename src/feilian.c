@@ -350,6 +350,11 @@ static const char *cookie_value(feilian_client *c, const char *name,
     return NULL;
 }
 
+int feilian_has_cookie(feilian_client *c, const char *name) {
+    char tmp[512];
+    return cookie_value(c, name, tmp, sizeof tmp) != NULL;
+}
+
 int feilian_https(feilian_client *c, const char *method, const char *url,
                   const char *json_body, char *body, size_t cap) {
     /* Always clear the reply first: on a transport failure (-1) the
@@ -454,6 +459,12 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
         if (cookie_value(c, "admin-csrf-token", tok, sizeof tok))
             n += snprintf(req + n, sizeof req - (size_t)n, "admin-csrf-token: %s\r\n", tok);
     }
+    /* Origin/Referer — a browser fetch sends these, and CSRF
+     * middleware on the node may check them alongside the token.
+     * The desktop bridge's requests carry the portal origin too. */
+    if (c->server[0])
+        n += snprintf(req + n, sizeof req - (size_t)n,
+                      "Origin: %s\r\nReferer: %s/\r\n", c->server, c->server);
     if (json_body)
         n += snprintf(req + n, sizeof req - (size_t)n,
                       "Content-Length: %zu\r\n", strlen(json_body));
@@ -685,6 +696,19 @@ int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
     else
         snprintf(payload, sizeof payload, "{\"public_key\":\"%s\"}", public_key);
     const char *base = vpn_base_url && vpn_base_url[0] ? vpn_base_url : c->server;
+    /* The gateway node has its own session: the official service
+     * exposes a /vpn/ping route on the node, and the node answers
+     * /vpn/conn with 10220001 "Cookies are missing" even when the
+     * portal cookies are sent. Touch the node first — a ping may
+     * set the node-side session cookie that /vpn/conn then checks.
+     * Any Set-Cookie on the ping is accumulated into the jar by
+     * feilian_https, exactly like every other call. */
+    {
+        char ping_url[1024], ping_body[512];
+        build_url(ping_url, sizeof ping_url, base, "/vpn/ping?os=%s&os_version=%s",
+                  c->os, c->os_version);
+        feilian_https(c, "GET", ping_url, NULL, ping_body, sizeof ping_body);
+    }
     build_url(url, sizeof url, base, "/vpn/conn?os=%s&os_version=%s",
               c->os, c->os_version);
     return feilian_https(c, "POST", url, payload, body, cap);

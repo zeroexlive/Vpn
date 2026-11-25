@@ -131,6 +131,9 @@ int feilian_vpn_mfa_verify(feilian_client *c, const char *code,
 int feilian_vpn_mfa_send(feilian_client *c, const char *code_type,
                          char *body, size_t cap);
 
+/* Does the jar hold a cookie with this name? (For log lines only.) */
+int feilian_has_cookie(feilian_client *c, const char *name);
+
 /* Log the NAMES of the cookies held (never their values). Useful
  * when a server says "cookies are missing" — it shows whether the
  * jar is empty or a cookie was rotated away. */

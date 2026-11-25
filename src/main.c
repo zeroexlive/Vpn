@@ -215,6 +215,8 @@ static void do_connect(App *a) {
      * the node says "cookies are missing", this shows whether the
      * jar is empty or a cookie was lost/rotated. */
     feilian_log_cookie_names(&a->api, a->log, sizeof a->log);
+    app_logf(a, "CSRF header will be sent: %s",
+             feilian_has_cookie(&a->api, "csrf-token") ? "yes (csrf-token cookie present)" : "NO — csrf-token cookie missing from jar");
     st = feilian_fetch_peer_otp(&a->api, conn_base, a->wg_public, otp, body, sizeof body);
     app_logf(a, "vpn/conn: HTTP %d", st);
     app_logf(a, "%.800s", body);
@@ -243,7 +245,7 @@ int main(void) {
     a.os_index = 0; /* Linux — the OS this binary is running on */
     strncpy(a.api.os_version, "2", sizeof a.api.os_version - 1);
     strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
-    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only.");
+    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v14: CSRF headers, Origin/Referer, node ping before /vpn/conn)");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
     /* Restore a saved login session, if there is one — the official
      * client also stays logged in across restarts. A saved session
