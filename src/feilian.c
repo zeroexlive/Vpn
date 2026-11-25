@@ -5,6 +5,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
@@ -14,6 +15,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 void feilian_log(char *log, size_t cap, const char *fmt, ...) {
@@ -231,6 +233,15 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     if (hdr_end) {
         *hdr_end = '\0';
         accumulate_cookies(c, all);
+        /* Server Date -> TOTP time offset (server clock minus local). */
+        const char *dp = strcasestr(all, "\r\nDate:");
+        if (dp) {
+            struct tm tm = {0};
+            if (strptime(dp + 7, "%a, %d %b %Y %H:%M:%S GMT", &tm)) {
+                time_t srv = timegm(&tm);
+                if (srv != (time_t)-1) c->date_offset_sec = (long)(srv - time(NULL));
+            }
+        }
         const char *b = hdr_end + 4;
         /* Chunked transfer: de-chunk minimally (first chunk only is
          * enough for the small JSON replies here; full de-chunking is a TODO). */
@@ -348,12 +359,105 @@ int feilian_list_vpn(feilian_client *c, char *body, size_t cap) {
 
 int feilian_fetch_peer(feilian_client *c, const char *vpn_base_url,
                        const char *public_key, char *body, size_t cap) {
+    return feilian_fetch_peer_otp(c, vpn_base_url, public_key, NULL, body, cap);
+}
+
+int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
+                           const char *public_key, const char *otp,
+                           char *body, size_t cap) {
     char payload[512], url[1024];
-    snprintf(payload, sizeof payload, "{\"public_key\":\"%s\"}", public_key);
+    if (otp && otp[0])
+        snprintf(payload, sizeof payload,
+                 "{\"public_key\":\"%s\",\"otp\":\"%s\"}", public_key, otp);
+    else
+        snprintf(payload, sizeof payload, "{\"public_key\":\"%s\"}", public_key);
     const char *base = vpn_base_url && vpn_base_url[0] ? vpn_base_url : c->server;
     build_url(url, sizeof url, base, "/vpn/conn?os=%s&os_version=%s",
               c->os, c->os_version);
     return feilian_https(c, "POST", url, payload, body, cap);
+}
+
+int feilian_get_otp_uri(feilian_client *c, char *body, size_t cap) {
+    char url[1024];
+    build_url(url, sizeof url, c->server, "/api/v2/p/otp?os=%s&os_version=%s",
+              c->os, c->os_version);
+    return feilian_https(c, "GET", url, NULL, body, cap);
+}
+
+int feilian_mfa_type(feilian_client *c, char *body, size_t cap) {
+    char url[1024];
+    build_url(url, sizeof url, c->server, "/api/mfa/type?os=%s&os_version=%s",
+              c->os, c->os_version);
+    return feilian_https(c, "GET", url, NULL, body, cap);
+}
+
+int feilian_mfa_send(feilian_client *c, const char *mfa_type,
+                     char *body, size_t cap) {
+    char payload[512], url[1024];
+    snprintf(payload, sizeof payload,
+             "{\"mfa_type\":\"%s\",\"login_scene\":\"login\",\"account\":\"%s\"}",
+             mfa_type, c->username);
+    build_url(url, sizeof url, c->server, "/api/v1/login/mfa/send?os=%s&os_version=%s",
+              c->os, c->os_version);
+    return feilian_https(c, "POST", url, payload, body, cap);
+}
+
+int feilian_mfa_verify(feilian_client *c, const char *mfa_type,
+                       const char *code, char *body, size_t cap) {
+    char payload[1024], url[1024];
+    if (strcmp(mfa_type, "password") == 0) {
+        char pw_hex[65];
+        feilian_sha256_hex(code, pw_hex);
+        snprintf(payload, sizeof payload,
+                 "{\"mfa_type\":\"password\",\"login_scene\":\"login\",\"account\":\"%s\",\"password\":\"%s\",\"code\":\"\"}",
+                 c->username, pw_hex);
+    } else {
+        snprintf(payload, sizeof payload,
+                 "{\"mfa_type\":\"%s\",\"login_scene\":\"login\",\"account\":\"%s\",\"code\":\"%s\"}",
+                 mfa_type, c->username, code);
+    }
+    build_url(url, sizeof url, c->server, "/api/v1/login/mfa/verify?os=%s&os_version=%s",
+              c->os, c->os_version);
+    return feilian_https(c, "POST", url, payload, body, cap);
+}
+
+/* Base32 decode (RFC 4648, uppercase, padding optional). */
+static int b32_decode(const char *in, unsigned char *out, size_t cap) {
+    size_t n = 0;
+    int bits = 0, val = 0;
+    for (const char *p = in; *p; p++) {
+        int v;
+        if (*p >= 'A' && *p <= 'Z') v = *p - 'A';
+        else if (*p >= 'a' && *p <= 'z') v = *p - 'a';
+        else if (*p >= '2' && *p <= '7') v = *p - '2' + 26;
+        else if (*p == '=') break;
+        else continue;
+        val = (val << 5) | v;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            if (n >= cap) return -1;
+            out[n++] = (unsigned char)((val >> bits) & 0xff);
+        }
+    }
+    return (int)n;
+}
+
+int feilian_totp(feilian_client *c, const char *secret, char *out6) {
+    unsigned char key[128];
+    int klen = b32_decode(secret, key, sizeof key);
+    if (klen <= 0) return -1;
+    long long counter = (long long)(time(NULL) + c->date_offset_sec) / 30;
+    unsigned char msg[8];
+    for (int i = 7; i >= 0; i--) { msg[i] = (unsigned char)(counter & 0xff); counter >>= 8; }
+    unsigned char hmac[20];
+    unsigned int hlen = 0;
+    if (!HMAC(EVP_sha1(), key, klen, msg, 8, hmac, &hlen)) return -1;
+    int off = hmac[19] & 0x0f;
+    int code = ((hmac[off] & 0x7f) << 24) | (hmac[off + 1] << 16) |
+               (hmac[off + 2] << 8) | hmac[off + 3];
+    snprintf(out6, 7, "%06d", code % 1000000);
+    return 0;
 }
 
 int feilian_gen_wg_keypair(char *private_b64, size_t priv_cap,

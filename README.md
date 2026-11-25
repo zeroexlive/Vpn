@@ -58,8 +58,22 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
 1. Choose the OS to report, **before** logging in.
 2. Enter a company code (resolved via `/api/match`) or paste the
-   server URL directly, then username and password.
-3. **Log in** — the log shows `login/setting`, then `login`.
+   server URL directly, press Next, then enter email and password
+   and press Log in. If the server needs a second factor, pick a
+   type (otp / email / mobile / push / password), Send code, enter
+   the code, Verify.
+3. Main layout: press Connect. Two MFA ways, as in the official app:
+   - Enter the 6-digit OTP from your mobile app (e.g. 617928) —
+     sent as `"otp"` in `POST /vpn/conn`. If the server returned a
+     TOTP secret via `GET /api/v2/p/otp` after login, the code is
+     generated locally (RFC 6238, server-time offset) and the field
+     can be left empty.
+   - Confirm on mobile app (push): the client asks `/api/mfa/type`,
+     and if `push` is offered it sends a push request, you approve
+     it on your mobile app, then press Connect. Note: in the
+     official client push goes through corplink-service
+     `sendPushConfirm {scene:"vpn"}`; if your server does not offer
+     push over HTTP, use the OTP way.
 4. **List VPN servers** — raw `/api/vpn/list` reply in the log.
 5. **Connect** — generates a WireGuard keypair, calls `/vpn/conn`,
    and writes `corplink.conf` in the current directory when the

@@ -41,6 +41,8 @@ typedef struct {
     char os_version[32];   /* e.g. "2" (corplink-go) — keep as the server expects */
     char device_name[128];
     char cookies[4096];    /* Cookie: header value, accumulated from Set-Cookie */
+    char totp_secret[128]; /* base32 TOTP secret from /api/v2/p/otp, if any */
+    long date_offset_sec;  /* server Date minus local time, for TOTP */
     int logged_in;
 } feilian_client;
 
@@ -71,6 +73,33 @@ int feilian_list_vpn(feilian_client *c, char *body, size_t cap);
 /* POST /vpn/conn — ask the server for a WireGuard peer for our public key. */
 int feilian_fetch_peer(feilian_client *c, const char *vpn_base_url,
                        const char *public_key, char *body, size_t cap);
+
+/* Same, with the 6-digit OTP from the mobile app (TOTP code, e.g.
+ * "617928"). Pass "" / NULL to omit it. The official flow asks for
+ * this OTP at Connect time, after login. */
+int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
+                           const char *public_key, const char *otp,
+                           char *body, size_t cap);
+
+/* GET /api/v2/p/otp — returns an otpauth:// URL with a TOTP secret.
+ * The mobile app shows the same code; if this succeeds the client
+ * can generate the OTP itself instead of asking you to type it. */
+int feilian_get_otp_uri(feilian_client *c, char *body, size_t cap);
+
+/* Generate a 6-digit TOTP (RFC 6238, SHA-1, 30 s step) from a base32
+ * secret, using local time + c->date_offset_sec. Returns 0 on success. */
+int feilian_totp(feilian_client *c, const char *secret, char *out6);
+
+/* MFA at login (3.2 API, from app.asar):
+ *  POST /api/v1/login/mfa/send   {mfa_type, login_scene:"login", account}
+ *  POST /api/v1/login/mfa/verify {mfa_type, login_scene:"login", account, code}
+ *  GET  /api/mfa/type — lists the MFA types the server offers
+ *       (otp / email / mobile / password / passkey / push-app). */
+int feilian_mfa_send(feilian_client *c, const char *mfa_type,
+                     char *body, size_t cap);
+int feilian_mfa_verify(feilian_client *c, const char *mfa_type,
+                       const char *code, char *body, size_t cap);
+int feilian_mfa_type(feilian_client *c, char *body, size_t cap);
 
 /* Curve25519 WireGuard keypair, clamped as WireGuard requires.
  * private_b64 / public_b64 are base64, 44 chars + NUL. */
