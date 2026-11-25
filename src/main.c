@@ -38,6 +38,8 @@ typedef struct {
     feilian_client api;
     int os_index;
     int stage; /* 0 company, 1 email/password, 2 main layout */
+    int need_2fa; /* set only if the server returns next.action == "2FA" */
+    char mfa_code[16];
     char server[512];
     char company[128];
     char username[128];
@@ -72,25 +74,12 @@ static void sync_api_from_ui(App *a) {
     if (a->proxy[0]) setenv("https_proxy", a->proxy, 1);
 }
 
-/* After a successful password login, try to fetch the TOTP secret so
- * Connect can fill the OTP in by itself. */
+/* After a successful password login, 3.2.16 has NO /api/v2/p/otp
+ * endpoint, so there is no TOTP secret to fetch. OTP at Connect is
+ * entered from the mobile app. */
 static void try_fetch_totp_secret(App *a) {
-    char body[8192];
-    int st = feilian_get_otp_uri(&a->api, body, sizeof body);
-    if (st != 200) { app_logf(a, "otp uri: HTTP %d (OTP will be manual)", st); return; }
-    char url[1024] = "";
-    if (feilian_json_string(body, "url", url, sizeof url) < 0) {
-        app_logf(a, "otp uri: no url in reply (OTP will be manual)");
-        return;
-    }
-    const char *s = strstr(url, "secret=");
-    if (!s) { app_logf(a, "otp uri: no secret in %s", url); return; }
-    s += strlen("secret=");
-    size_t i = 0;
-    while (s[i] && s[i] != '&' && i + 1 < sizeof a->api.totp_secret)
-        a->api.totp_secret[i] = s[i], i++;
-    a->api.totp_secret[i] = '\0';
-    app_logf(a, "TOTP secret saved — Connect will generate the OTP itself.");
+    (void)a;
+    app_logf(a, "OTP at Connect is entered from your mobile app.");
 }
 
 static void do_connect(App *a) {
@@ -204,21 +193,60 @@ int main(void) {
                             if (st == 200) app_logf(&a, "%.500s", body);
                             st = feilian_login_password(&a.api, a.password, body, sizeof body);
                             app_logf(&a, "login: HTTP %d, code=%d", st, feilian_json_code(body));
-                            if (st == 200 && feilian_json_code(body) == 0) {
-                                app_logf(&a, "Logged in as %s.", a.username);
-                                a.api.logged_in = 1;
-                                memset(a.password, 0, sizeof a.password);
-                                try_fetch_totp_secret(&a);
-                                a.stage = 2;
+                            if (st == -1) {
+                                app_logf(&a, "Login failed (no response): %s", a.api.last_error);
+                            } else if (st == 200 && feilian_json_code(body) == 0) {
+                                char action[64] = "";
+                                feilian_next_action(body, action, sizeof action);
+                                app_logf(&a, "login next.action: %s", action[0] ? action : "(none)");
+                                if (action[0] == '\0' || strcmp(action, "main") == 0) {
+                                    app_logf(&a, "Logged in as %s.", a.username);
+                                    a.api.logged_in = 1;
+                                    memset(a.password, 0, sizeof a.password);
+                                    try_fetch_totp_secret(&a);
+                                    a.stage = 2;
+                                } else if (strcmp(action, "2FA") == 0) {
+                                    app_logf(&a, "Server asks for a second factor at login (next=2FA) — use the MFA screen below.");
+                                    a.need_2fa = 1;
+                                } else {
+                                    app_logf(&a, "Server wants next step '%s' — not implemented yet. Full reply: %.500s", action, body);
+                                }
                             } else {
                                 app_logf(&a, "Login failed: %.500s", body);
-                                app_logf(&a, "Check email / password and try again. There is no second factor at login — MFA is only at Connect.");
+                                app_logf(&a, "Check email / password and try again. There is no second factor at login unless the server returns next=2FA — MFA is normally only at Connect.");
                             }
                         } else {
                             app_logf(&a, "Need a server, email and password.");
                         }
                     }
                     if (cui_button(ui, "Back")) a.stage = 0;
+                }
+                if (a.need_2fa) {
+                    cui_text(ui, "Second factor — only because the server returned next=2FA");
+                    cui_input(ui, "mfa_code", a.mfa_code, sizeof a.mfa_code,
+                              .label = "Code", .placeholder = "6-digit code");
+                    cui_row(ui, .gap = 8) {
+                        if (cui_button(ui, "Send code")) {
+                            sync_api_from_ui(&a);
+                            char body[8192];
+                            int st = feilian_mfa_send(&a.api, "otp", body, sizeof body);
+                            app_logf(&a, "mfa/send (otp): HTTP %d — %.500s", st, body);
+                        }
+                        if (cui_button(ui, "Verify")) {
+                            sync_api_from_ui(&a);
+                            char body[8192];
+                            int st = feilian_mfa_verify(&a.api, "otp", a.mfa_code, body, sizeof body);
+                            app_logf(&a, "mfa/verify: HTTP %d, code=%d", st, feilian_json_code(body));
+                            if (st == 200 && feilian_json_code(body) == 0) {
+                                app_logf(&a, "MFA verified — logged in as %s.", a.username);
+                                a.api.logged_in = 1;
+                                a.need_2fa = 0;
+                                a.stage = 2;
+                            } else {
+                                app_logf(&a, "MFA failed: %.500s", body);
+                            }
+                        }
+                    }
                 }
             } else {
                 cui_textf(ui, "Hi, %s", a.username);
@@ -227,7 +255,7 @@ int main(void) {
                 cui_input(ui, "otp", a.otp, sizeof a.otp,
                           .label = "One-Time Password",
                           .placeholder = "6-digit code from your mobile app (e.g. 617928)");
-                cui_text(ui, "Leave the code empty if the TOTP secret was fetched — it will be generated for you.");
+                cui_text(ui, "Enter the 6-digit OTP from your mobile app — it changes every 30 s.");
                 cui_row(ui, .gap = 8) {
                     if (cui_button(ui, "Connect", .variant = CUI_BUTTON_PRIMARY)) do_connect(&a);
                     if (cui_button(ui, "Confirm on mobile app")) {

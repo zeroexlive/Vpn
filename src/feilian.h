@@ -29,7 +29,8 @@
  * enrolled this device/account for.
  */
 
-#define FEILIAN_MATCH_URL "https://corplink.volcengine.cn/api/match"
+#define FEILIAN_MATCH_URL "https://corplink.isealsuite.com/api/match?language=en"
+#define FEILIAN_MATCH_URL_LEGACY "https://corplink.volcengine.cn/api/match"
 /* Same UA as the public corplink-go client — the server/WAF accepts it. */
 #define FEILIAN_USER_AGENT "CorpLink/201000 (GooglePixel; Android 10; en)"
 
@@ -44,6 +45,8 @@ typedef struct {
     char totp_secret[128]; /* base32 TOTP secret from /api/v2/p/otp, if any */
     long date_offset_sec;  /* server Date minus local time, for TOTP */
     char last_error[512];  /* set by feilian_https on transport failure */
+    int enable_self_signed; /* from /api/match: server uses a self-signed cert */
+    char self_signed_cert[8192]; /* PEM from /api/match, if any */
     int logged_in;
 } feilian_client;
 
@@ -60,13 +63,23 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
 /* Resolve company code -> server URL via /api/match. */
 int feilian_match_company(feilian_client *c, char *err, size_t err_cap);
 
-/* GET /api/login/setting — shows which login methods the server offers. */
+/* GET /api/login/setting — shows which login methods the server offers.
+ * 3.2.16: no query params. */
 int feilian_login_setting(feilian_client *c, char *body, size_t cap);
 
-/* POST /api/login — password is SHA-256 hexed first unless it is
- * already 64 hex chars, matching corplink-go. */
+/* POST /api/v1/login — 3.2.16 official flow:
+ * {"login_scene":"feilian","account_type":"email",
+ *  "account":"<email>","password":"<aesEncryptIv(password)>"}
+ * AES key/IV are in the official client's native module and are not
+ * recoverable from the .deb by inspection, so this build sends the
+ * trimmed password plain and logs the server's reply verbatim —
+ * that reply is the probe that tells us if AES is enforced. */
 int feilian_login_password(feilian_client *c, const char *password,
                            char *body, size_t cap);
+
+/* Read data.next.action from the double-envelope login reply
+ * (outer code, inner data is a JSON string). Returns 0 on success. */
+int feilian_next_action(const char *body, char *out, size_t cap);
 
 /* GET /api/vpn/list */
 int feilian_list_vpn(feilian_client *c, char *body, size_t cap);

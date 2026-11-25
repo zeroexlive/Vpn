@@ -28,20 +28,38 @@ corplink-go / corplink-rs clients:
 
 | Step | Call |
 |---|---|
-| Company → server | `POST https://corplink.volcengine.cn/api/match` `{"code": "<company>"}` |
-| Login method | `GET {server}/api/login/setting?os={os}&os_version={ver}` |
-| Login (password) | `POST {server}/api/login?os={os}&os_version={ver}` `{"user_name": "…", "password": "<sha256 hex>", "platform": "feilian"}` |
-| List VPN | `GET {server}/api/vpn/list?os={os}&os_version={ver}` |
-| Fetch WireGuard peer | `POST {server}/vpn/conn?os={os}&os_version={ver}` `{"public_key": "…"}` |
-| Keep-alive / disconnect | `POST {server}/vpn/report?os={os}&os_version={ver}` |
+| Company → server | `POST https://corplink.isealsuite.com/api/match?language=en` `{"code": "<company>"}` (legacy fallback: `corplink.volcengine.cn/api/match`). Reply `data.domain` is the server; `enable_self_signed` / `self_signed_cert` are the corp cert to trust for TLS to it. |
+| Login method | `GET {server}/api/login/setting` (no query params) |
+| Login (password) | `POST {server}/api/v1/login` `{"login_scene": "feilian", "account_type": "email", "account": "…", "password": "<aesEncryptIv(password)>"}` |
+| List VPN | `GET {server}/api/vpn/list` (legacy path; 3.2.16 UI uses the local service `getVpnList`) |
+| Fetch WireGuard peer | `POST {server}/vpn/conn` `{"public_key": "…", "otp": "…"}` (legacy path; 3.2.16 UI uses `connectVpn`) |
+| Keep-alive / disconnect | `POST {server}/vpn/report` |
 
-The `os` / `os_version` query parameters are how the server picks
-the login method. The UI asks for the OS **before login**, defaulting
-to the OS this binary is actually running on (Linux here). Send the
-value your deployment enrolled this device / account for.
+The reply to login is a double envelope: outer `code`, inner
+`data` is a JSON string, and `data.next.action` decides the next
+screen (`main` = logged in, `2FA` = second factor,
+`ChangeInitPassword`, `SelectUser`, …). A failure stays on the
+login screen with the server's message — never a 2FA screen after
+a failure.
 
-Passwords are SHA-256 hexed before sending (matching corplink-go),
-never written to disk. Cookies are kept in memory only.
+**Password encryption:** the server's setting says
+`"password_encrypted":true`, and the official client encrypts
+with `aesEncryptIv` from its native preload bridge. That function
+lives in the packed native module `Common.Build-*.node` (its ELF
+header is obfuscated and it is loaded/decrypted by
+`linuxx64.node`'s loader), so the AES key/IV are not recoverable
+by static inspection. This client sends the trimmed password
+plain and logs the server's reply verbatim. On the test server
+(`test.ifeilian.cn`) that is accepted as a parameter — a dummy
+password gives code `10110001` "user name or password is
+incorrect", not a parameter/decrypt error — so plain may work,
+or the server may be treating the plain text as a failed
+decrypt. If a correct password still gives `10110001`, AES is
+enforced and the key must be recovered by running the official
+bridge, not by reading the .deb.
+
+The OS picker is kept for the legacy endpoints that still take
+`os`/`os_version`; the 3.2.16 login calls take no `os` param.
 
 ## Build
 

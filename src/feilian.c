@@ -6,8 +6,10 @@
 #include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <openssl/x509.h>
 #include <openssl/rand.h>
 #include <openssl/sha.h>
 #include <openssl/ssl.h>
@@ -63,11 +65,36 @@ int feilian_json_string(const char *body, const char *key,
     p++;
     size_t i = 0;
     while (*p && *p != '"' && i + 1 < cap) {
-        if (*p == '\\' && p[1]) p++;
+        if (*p == '\\' && p[1]) {
+            p++;
+            switch (*p) {
+                case 'n': out[i++] = '\n'; p++; continue;
+                case 'r': out[i++] = '\r'; p++; continue;
+                case 't': out[i++] = '\t'; p++; continue;
+                case 'b': out[i++] = '\b'; p++; continue;
+                case 'f': out[i++] = '\f'; p++; continue;
+                default: break;
+            }
+        }
         out[i++] = *p++;
     }
     out[i] = '\0';
     return (int)i;
+}
+
+/* Find "key":true/false. Returns 1/0, or -1 if absent. */
+static int feilian_json_bool(const char *body, const char *key) {
+    char pat[128];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(body, pat);
+    if (!p) return -1;
+    p = strchr(p + strlen(pat), ':');
+    if (!p) return -1;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (strncmp(p, "true", 4) == 0) return 1;
+    if (strncmp(p, "false", 5) == 0) return 0;
+    return -1;
 }
 
 static void accumulate_cookies(feilian_client *c, const char *headers) {
@@ -236,13 +263,33 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     if (fd < 0) return -1;
 
     SSL_CTX *ctx = SSL_CTX_new(TLS_client_method());
+    if (c->self_signed_cert[0]) {
+        /* Trust the corp cert the match reply gave us (official client
+         * does the same — the bridge trusts enable_self_signed /
+         * self_signed_cert). This is what makes login/setting work
+         * against self-signed deployments instead of failing TLS. */
+        BIO *bio = BIO_new_mem_buf(c->self_signed_cert, -1);
+        X509 *cert = bio ? PEM_read_bio_X509(bio, NULL, NULL, NULL) : NULL;
+        if (cert) {
+            X509_STORE_add_cert(SSL_CTX_get_cert_store(ctx), cert);
+            X509_free(cert);
+        }
+        if (bio) BIO_free(bio);
+    } else if (c->enable_self_signed) {
+        SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+    }
     SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host);
     SSL_set_alpn_protos(ssl, (unsigned char *)"\x08http/1.1", 9);
     if (SSL_connect(ssl) != 1) {
+        unsigned long e = ERR_get_error();
+        char errbuf[256] = "";
+        if (e) ERR_error_string_n(e, errbuf, sizeof errbuf);
+        long verify = SSL_get_verify_result(ssl);
         snprintf(c->last_error, sizeof c->last_error,
-                 "TLS handshake failed to %s — server may require a proxy, or TLS is blocked", host);
+                 "TLS handshake failed to %s (%s, verify=%ld) — server may use a self-signed cert, or TLS is blocked",
+                 host, errbuf[0] ? errbuf : "no OpenSSL detail", verify);
         SSL_free(ssl); SSL_CTX_free(ctx); close(fd); return -1;
     }
 
@@ -334,11 +381,21 @@ static int build_url(char *out, size_t cap, const char *server,
 int feilian_match_company(feilian_client *c, char *err, size_t err_cap) {
     char payload[256], body[8192];
     snprintf(payload, sizeof payload, "{\"code\":\"%s\"}", c->company);
-    /* /api/match is a standalone POST, not via feilian_https' cookie
-     * handling for the server URL — reuse it with a throwaway client. */
     feilian_client tmp = *c;
     tmp.cookies[0] = '\0';
+    /* Official 3.2.16 base first, legacy volcengine base as fallback. */
     int st = feilian_https(&tmp, "POST", FEILIAN_MATCH_URL, payload, body, sizeof body);
+    if (st != 200 || feilian_json_code(body) != 0) {
+        feilian_client tmp2 = *c;
+        tmp2.cookies[0] = '\0';
+        char body2[8192];
+        int st2 = feilian_https(&tmp2, "POST", FEILIAN_MATCH_URL_LEGACY, payload, body2, sizeof body2);
+        if (st2 == 200 && feilian_json_code(body2) == 0) {
+            tmp = tmp2;
+            strncpy(body, body2, sizeof body - 1);
+            st = st2;
+        }
+    }
     if (st != 200) {
         if (st == -1)
             snprintf(err, err_cap, "match: %s", tmp.last_error[0] ? tmp.last_error : "no response from server");
@@ -353,6 +410,10 @@ int feilian_match_company(feilian_client *c, char *err, size_t err_cap) {
         snprintf(err, err_cap, "match: %s", msg[0] ? msg : body);
         return -1;
     }
+    /* Self-signed cert the server gave us — needed for TLS to it. */
+    int ss = feilian_json_bool(body, "enable_self_signed");
+    if (ss >= 0) c->enable_self_signed = ss;
+    feilian_json_string(body, "self_signed_cert", c->self_signed_cert, sizeof c->self_signed_cert);
     char url[512];
     /* The reply's server is in data.domain (RespCompany.Domain),
      * e.g. "https://test.ifeilian.cn:443" — not "url". */
@@ -370,37 +431,72 @@ int feilian_match_company(feilian_client *c, char *err, size_t err_cap) {
 }
 
 int feilian_login_setting(feilian_client *c, char *body, size_t cap) {
+    /* 3.2.16: GET /api/login/setting, no query params, no os. */
     char url[1024];
-    build_url(url, sizeof url, c->server, "/api/login/setting?os=%s&os_version=%s",
-              c->os, c->os_version);
+    size_t sl = strlen(c->server);
+    while (sl > 0 && c->server[sl - 1] == '/') sl--;
+    snprintf(url, sizeof url, "%.*s/api/login/setting", (int)sl, c->server);
     return feilian_https(c, "GET", url, NULL, body, cap);
+}
+
+/* Extract data.next.action from the double envelope:
+ * outer {"code":0,"data":"{\"next\":{\"action\":\"main\",...}}"}
+ * data is a JSON string, so "action" is escaped inside it. */
+int feilian_next_action(const char *body, char *out, size_t cap) {
+    const char *d = strstr(body, "\"data\"");
+    if (!d) return -1;
+    const char *a = strstr(d, "action");
+    if (!a) return -1;
+    /* a points at action (possibly \"action\" in the escaped string);
+     * find the value after the next ':' and '"' */
+    const char *p = strchr(a, ':');
+    if (!p) return -1;
+    p++;
+    while (*p && (*p == ' ' || *p == '"' || *p == '\\')) p++;
+    size_t i = 0;
+    while (*p && *p != '"' && *p != '\\' && i + 1 < cap) out[i++] = *p++;
+    out[i] = '\0';
+    return i > 0 ? 0 : -1;
 }
 
 int feilian_login_password(feilian_client *c, const char *password,
                            char *body, size_t cap) {
-    char pw_hex[65];
-    if (strlen(password) == 64) {
-        int hex = 1;
-        for (int i = 0; password[i]; i++)
-            if (!((password[i] >= '0' && password[i] <= '9') ||
-                  (password[i] >= 'a' && password[i] <= 'f') ||
-                  (password[i] >= 'A' && password[i] <= 'F'))) hex = 0;
-        if (hex) strncpy(pw_hex, password, sizeof pw_hex - 1);
-        else feilian_sha256_hex(password, pw_hex);
-    } else {
-        feilian_sha256_hex(password, pw_hex);
-    }
-    pw_hex[64] = '\0';
+    /* 3.2.16: POST /api/v1/login, no query params.
+     * {"login_scene":"feilian","account_type":"email",
+     *  "account":"<email>","password":"<aesEncryptIv(password)>"}
+     * The AES transform lives in the official client's native
+     * preload module and its key/IV are not recoverable from the
+     * .deb by string inspection. This build sends the trimmed
+     * password plain and logs the server's exact reply, so the
+     * error will tell us if AES is enforced (decrypt/format error)
+     * or if plain is accepted. Do NOT send SHA-256 here — the
+     * server would never match it against an AES-decrypted value. */
+    char pw[256];
+    /* Trim leading/trailing whitespace only — keep inner spaces. */
+    strncpy(pw, password, sizeof pw - 1); pw[sizeof pw - 1] = '\0';
+    size_t n = strlen(pw);
+    while (n > 0 && (pw[n - 1] == ' ' || pw[n - 1] == '\t' || pw[n - 1] == '\n' || pw[n - 1] == '\r')) pw[--n] = '\0';
+    char *s = pw;
+    while (*s == ' ' || *s == '\t') s++;
     char payload[1024], url[1024];
+    const char *atype = strchr(c->username, '@') ? "email" : "email";
     snprintf(payload, sizeof payload,
-             "{\"user_name\":\"%s\",\"password\":\"%s\",\"platform\":\"feilian\"}",
-             c->username, pw_hex);
-    build_url(url, sizeof url, c->server, "/api/login?os=%s&os_version=%s",
-              c->os, c->os_version);
+             "{\"login_scene\":\"feilian\",\"account_type\":\"%s\",\"account\":\"%s\",\"password\":\"%s\"}",
+             atype, c->username, s);
+    size_t sl = strlen(c->server);
+    while (sl > 0 && c->server[sl - 1] == '/') sl--;
+    snprintf(url, sizeof url, "%.*s/api/v1/login", (int)sl, c->server);
     int st = feilian_https(c, "POST", url, payload, body, cap);
-    if (st == 200 && feilian_json_code(body) == 0) c->logged_in = 1;
-    /* The password hash is in `payload` only, on the stack. */
+    if (st == 200 && feilian_json_code(body) == 0) {
+        char action[64] = "";
+        if (feilian_next_action(body, action, sizeof action) == 0 &&
+            strcmp(action, "main") == 0)
+            c->logged_in = 1;
+        /* next.action == "2FA" / "ChangeInitPassword" / etc. is NOT
+         * a plain success — the caller must route on it. */
+    }
     memset(payload, 0, sizeof payload);
+    memset(pw, 0, sizeof pw);
     return st;
 }
 
@@ -449,7 +545,7 @@ int feilian_mfa_send(feilian_client *c, const char *mfa_type,
                      char *body, size_t cap) {
     char payload[512], url[1024];
     snprintf(payload, sizeof payload,
-             "{\"mfa_type\":\"%s\",\"login_scene\":\"login\",\"account\":\"%s\"}",
+             "{\"mfa_type\":\"%s\",\"login_scene\":\"feilian\",\"account\":\"%s\"}",
              mfa_type, c->username);
     build_url(url, sizeof url, c->server, "/api/v1/login/mfa/send?os=%s&os_version=%s",
               c->os, c->os_version);
@@ -463,11 +559,11 @@ int feilian_mfa_verify(feilian_client *c, const char *mfa_type,
         char pw_hex[65];
         feilian_sha256_hex(code, pw_hex);
         snprintf(payload, sizeof payload,
-                 "{\"mfa_type\":\"password\",\"login_scene\":\"login\",\"account\":\"%s\",\"password\":\"%s\",\"code\":\"\"}",
+                 "{\"mfa_type\":\"password\",\"login_scene\":\"feilian\",\"account\":\"%s\",\"password\":\"%s\",\"code\":\"\"}",
                  c->username, pw_hex);
     } else {
         snprintf(payload, sizeof payload,
-                 "{\"mfa_type\":\"%s\",\"login_scene\":\"login\",\"account\":\"%s\",\"code\":\"%s\"}",
+                 "{\"mfa_type\":\"%s\",\"login_scene\":\"feilian\",\"account\":\"%s\",\"code\":\"%s\"}",
                  mfa_type, c->username, code);
     }
     build_url(url, sizeof url, c->server, "/api/v1/login/mfa/verify?os=%s&os_version=%s",
