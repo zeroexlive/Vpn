@@ -5,20 +5,23 @@
  *  2. Email + password. No second factor here — SealSuite checks
  *     them and, if correct, you go to the main layout.
  *  3. Click Connect. The server then asks for MFA, two ways:
- *     - type the 6-digit OTP from the mobile app (sent as "otp"
- *       in /vpn/conn), or
- *     - tap "Confirm on mobile app" (push, /api/mfa/type + send).
- *     a. Enter the 6-digit OTP code from the mobile app
- *        (TOTP, shown in the mobile app as e.g. "617 928"), or
- *     b. Confirm on the mobile app (push authentication).
- *     Way (a) is sent as {"public_key": ..., "otp": "617928"} to
- *     POST /vpn/conn. Way (b) in the official client goes through
- *     corplink-service sendPushConfirm {scene:"vpn"}; this client
- *     tries the server's MFA push endpoint and, if the server does
- *     not offer one, tells you to use (a). After login the client
- *     also tries GET /api/v2/p/otp — if the server returns an
- *     otpauth:// URL with a TOTP secret, the OTP is generated
- *     locally and the code field is filled in for you.
+ *     - type the 6-digit OTP from the mobile app. The official
+ *       client verifies it FIRST via POST /api/mfa/code/verify
+ *       {"mfa_scene":"vpn","code":"…","code_type":"otp"}, and
+ *       only then calls the local service's connectVpn. Sending
+ *       the OTP straight to POST /vpn/conn does not work — that
+ *       endpoint does not exist on the portal (HTTP 404).
+ *     - tap "Confirm on mobile app" (push). In the official
+ *       client this goes through corplink-service
+ *       sendPushConfirm {scene:"vpn"}; there is no HTTP push
+ *       endpoint, so this client probes
+ *       POST /api/mfa/code/send {"mfa_scene":"vpn",
+ *       "code_type":"push"} and falls back to the OTP field.
+ *     The tunnel itself is brought up by the local service's
+ *     connectVpn (mode Split/Full, selected route); this client
+ *     fetches the VPN list, posts /vpn/conn to the node url
+ *     from the list if it has one, and writes corplink.conf
+ *     from the peer reply so wg-quick can bring the tunnel up.
  *
  * OS is picked BEFORE login (default: the OS this binary runs on).
  * No password is ever written to disk. Cookies are kept in memory only.
@@ -105,7 +108,45 @@ static void do_connect(App *a) {
         app_logf(a, "Could not generate a WireGuard keypair."); return;
     }
     char body[8192];
-    int st = feilian_fetch_peer_otp(&a->api, a->api.server, a->wg_public, otp, body, sizeof body);
+    /* 1. Verify the OTP FIRST, like the official client does
+     * (connectVpn verifies via /api/mfa/code/verify, then calls
+     * the local service's connectVpn). If the code is wrong the
+     * server says so here — the old build sent the OTP straight
+     * to POST /vpn/conn, which does not exist on the portal
+     * (HTTP 404), so even a correct OTP "didn't work". */
+    int st = feilian_vpn_mfa_verify(&a->api, otp, "otp", body, sizeof body);
+    app_logf(a, "mfa/code/verify: HTTP %d", st);
+    app_logf(a, "%.800s", body);
+    if (!(st == 200 && feilian_json_code(body) == 0)) {
+        app_logf(a, "OTP not accepted by the server — get a fresh code from your mobile app (it changes every 30 s) and try again.");
+        return;
+    }
+    app_logf(a, "OTP accepted. Fetching the VPN list to find the gateway to connect to…");
+    /* 2. GET /api/vpn/list. In the old corplink-go flow the list
+     * carried a per-node url, and /vpn/conn was posted to that
+     * node — not to the portal. The 404 came from posting it to
+     * the portal (ourbit.sealsuite.com). */
+    st = feilian_list_vpn(&a->api, body, sizeof body);
+    app_logf(a, "vpn/list: HTTP %d", st);
+    app_logf(a, "%.800s", body);
+    char node_base[512] = "";
+    if (st == 200) {
+        /* First "url" value in the list reply, if any. */
+        const char *u = strstr(body, "\"url\"");
+        if (u) {
+            const char *q = strchr(u + 5, '"');
+            if (q) {
+                const char *e = strchr(q + 1, '"');
+                if (e && (size_t)(e - (q + 1)) < sizeof node_base) {
+                    memcpy(node_base, q + 1, (size_t)(e - (q + 1)));
+                    node_base[e - (q + 1)] = '\0';
+                }
+            }
+        }
+    }
+    const char *conn_base = node_base[0] ? node_base : a->api.server;
+    app_logf(a, "Posting /vpn/conn to: %s", conn_base);
+    st = feilian_fetch_peer_otp(&a->api, conn_base, a->wg_public, otp, body, sizeof body);
     app_logf(a, "vpn/conn: HTTP %d", st);
     app_logf(a, "%.800s", body);
     if (st == 200 && feilian_json_code(body) == 0) {
@@ -122,7 +163,7 @@ static void do_connect(App *a) {
             app_logf(a, "Public key for this session: %s", a->wg_public);
         }
     } else {
-        app_logf(a, "Connect failed — check the OTP (it changes every 30 s) and try again.");
+        app_logf(a, "Connect failed — the tunnel itself is brought up by the official client's local service (connectVpn), not by this HTTP call. Paste the vpn/list reply above and I will adjust the parser.");
     }
 }
 
@@ -271,9 +312,19 @@ int main(void) {
                         int st = feilian_mfa_type(&a.api, body, sizeof body);
                         app_logf(&a, "mfa/type: HTTP %d — %.500s", st, body);
                         if (st == 200 && strstr(body, "push")) {
-                            st = feilian_mfa_send(&a.api, "push", body, sizeof body);
-                            app_logf(&a, "Push sent to your mobile app (mfa/send push): HTTP %d — %.500s", st, body);
-                            app_logf(&a, "Approve it on your mobile app, then press Connect.");
+                            /* The official client sends push via the
+                             * local corplink-service (sendPushConfirm
+                             * {scene:"vpn"}), not over HTTP — the
+                             * earlier call to the LOGIN mfa/send
+                             * answered 40004 "Record not found".
+                             * Probe the VPN code/send shape instead;
+                             * if it fails, use the OTP field. */
+                            st = feilian_vpn_mfa_send(&a.api, "push", body, sizeof body);
+                            app_logf(&a, "mfa/code/send (push): HTTP %d — %.500s", st, body);
+                            if (st == 200 && feilian_json_code(body) == 0)
+                                app_logf(&a, "Push sent — approve it on your mobile app, then press Connect.");
+                            else
+                                app_logf(&a, "Push could not be sent from this client — enter the 6-digit OTP from your mobile app instead.");
                         } else {
                             app_logf(&a, "This server did not offer push confirm — enter the OTP code instead.");
                         }

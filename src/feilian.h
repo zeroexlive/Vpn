@@ -121,6 +121,16 @@ int feilian_mfa_verify(feilian_client *c, const char *mfa_type,
                        const char *code, char *body, size_t cap);
 int feilian_mfa_type(feilian_client *c, char *body, size_t cap);
 
+/* VPN-connect MFA (3.2.16 desktop store): verify the OTP FIRST,
+ * then connect. POST /api/mfa/code/verify
+ * {"mfa_scene":"vpn","code":"…","code_type":"otp"}.
+ * POST /api/mfa/code/send {"mfa_scene":"vpn","code_type":"…"}
+ * is the send for email/mobile (and the push probe). */
+int feilian_vpn_mfa_verify(feilian_client *c, const char *code,
+                           const char *code_type, char *body, size_t cap);
+int feilian_vpn_mfa_send(feilian_client *c, const char *code_type,
+                         char *body, size_t cap);
+
 /* Curve25519 WireGuard keypair, clamped as WireGuard requires.
  * private_b64 / public_b64 are base64, 44 chars + NUL. */
 int feilian_gen_wg_keypair(char *private_b64, size_t priv_cap,

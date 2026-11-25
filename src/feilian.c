@@ -592,6 +592,41 @@ int feilian_get_otp_uri(feilian_client *c, char *body, size_t cap) {
     return feilian_https(c, "GET", url, NULL, body, cap);
 }
 
+/* VPN-connect MFA (3.2.16 desktop store, module p):
+ * OTP:  POST /api/mfa/code/verify {"mfa_scene":"vpn","code":"…","code_type":"otp"}
+ *         — verified FIRST, then the client calls the local
+ *         service's connectVpn. If the code is wrong the server
+ *         says so here; the old client sent the OTP straight to
+ *         POST /vpn/conn, which does not exist on the portal
+ *         (HTTP 404), so a correct OTP still "didn't work".
+ * Push:   the official client uses the local corplink-service
+ *         sendPushConfirm {scene:"vpn"} — there is no HTTP push
+ *         endpoint. POST /api/v1/login/mfa/send with
+ *         mfa_type "push" is the LOGIN mfa send and answers
+ *         40004 "Record not found" for a VPN connect. */
+int feilian_vpn_mfa_verify(feilian_client *c, const char *code,
+                           const char *code_type, char *body, size_t cap) {
+    char payload[512], url[1024];
+    snprintf(payload, sizeof payload,
+             "{\"mfa_scene\":\"vpn\",\"code\":\"%s\",\"code_type\":\"%s\"}",
+             code, code_type);
+    size_t sl = strlen(c->server);
+    while (sl > 0 && c->server[sl - 1] == '/') sl--;
+    snprintf(url, sizeof url, "%.*s/api/mfa/code/verify", (int)sl, c->server);
+    return feilian_https(c, "POST", url, payload, body, cap);
+}
+
+int feilian_vpn_mfa_send(feilian_client *c, const char *code_type,
+                         char *body, size_t cap) {
+    char payload[256], url[1024];
+    snprintf(payload, sizeof payload,
+             "{\"mfa_scene\":\"vpn\",\"code_type\":\"%s\"}", code_type);
+    size_t sl = strlen(c->server);
+    while (sl > 0 && c->server[sl - 1] == '/') sl--;
+    snprintf(url, sizeof url, "%.*s/api/mfa/code/send", (int)sl, c->server);
+    return feilian_https(c, "POST", url, payload, body, cap);
+}
+
 int feilian_mfa_type(feilian_client *c, char *body, size_t cap) {
     char url[1024];
     build_url(url, sizeof url, c->server, "/api/mfa/type?os=%s&os_version=%s",
