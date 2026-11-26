@@ -105,6 +105,16 @@ int feilian_next_action(const char *body, char *out, size_t cap);
 /* GET /api/vpn/list */
 int feilian_list_vpn(feilian_client *c, char *body, size_t cap);
 
+/* Best-effort "portal refresh": after login, the official client's
+ * webview loads the portal pages, and the node error 10220001 hints
+ * ("switch the menu on left navigation bar to refresh pages") that
+ * the node wants a cookie those pages set. GET the post-login
+ * portal endpoints the SPA loads (index, tenant config, login
+ * token, feature flags, permissions) with the session cookies;
+ * any Set-Cookie is accumulated into the jar by feilian_https.
+ * Failures are ignored — the calls are only for cookies. */
+int feilian_refresh_portal(feilian_client *c);
+
 /* POST /vpn/conn — ask the server for a WireGuard peer for our public key. */
 int feilian_fetch_peer(feilian_client *c, const char *vpn_base_url,
                        const char *public_key, char *body, size_t cap);

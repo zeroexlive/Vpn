@@ -130,6 +130,7 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
 ## Status / limits
 
+- v18: v17 still got 10220001 — ping answers `{"code":0,"message":"pong"}` but sets **no** cookie, and no `vpn-token` ever appears in the jar, so the `jwt-token` header stays unsent. The error message itself hints at the missing piece ("switch the menu on left navigation bar to refresh pages"): the official client's webview loads the portal pages after login, and the node wants a cookie those pages set. New `feilian_refresh_portal()` runs right after OTP verify: it GETs the post-login portal endpoints the SPA loads (`/`, `/api/tenant/config`, `/api/login/token`, `/api/v1/feature_flag/result`, `/api/info/me/permission`) with the session cookies and keeps any `Set-Cookie` they return; the jar is logged again before `/vpn/conn` so a new cookie name shows up. Ruled out so far for this deployment: SPA knock (`enable_spa: false`), device cookies, query string, `jwt-token` (no cookie to send). Remaining hypothesis if this still fails: the `Sign` request header (interceptor `qd0`, HMAC-SHA256; the desktop service binary contains the `HttpSignHeader` proto and JWT-HMAC code, but the key comes from the native `generateHttpSignKey(activate_code, device_id)` — not reproducible from the app's static material).
 - v17: v15's device cookies were **not** enough — Connect still got
   10220001 with device cookies + CSRF header + Origin/Referer. Two
   more things the Android client sends on every node request that

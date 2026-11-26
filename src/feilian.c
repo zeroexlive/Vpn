@@ -815,6 +815,30 @@ int feilian_list_vpn(feilian_client *c, char *body, size_t cap) {
     return feilian_https(c, "GET", url, NULL, body, cap);
 }
 
+int feilian_refresh_portal(feilian_client *c) {
+    /* Endpoints the portal SPA loads on its main layout (from the
+     * portal's public JS and the 3.2.16 login module). The index
+     * page is the SPA itself; tenant/config carries the tenant
+     * signing config; login/token is the session-token endpoint.
+     * Any of them may Set-Cookie (admin-csrf-token, vpn-token, …)
+     * — feilian_https accumulates those into the jar. */
+    static const char *paths[] = {
+        "/",
+        "/api/tenant/config",
+        "/api/login/token",
+        "/api/v1/feature_flag/result",
+        "/api/info/me/permission",
+    };
+    char url[1024], scratch[2048];
+    int ok = 0;
+    for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
+        build_url(url, sizeof url, c->server, paths[i], "", "");
+        if (feilian_https(c, "GET", url, NULL, scratch, sizeof scratch) >= 0)
+            ok++;
+    }
+    return ok;
+}
+
 int feilian_fetch_peer(feilian_client *c, const char *vpn_base_url,
                        const char *public_key, char *body, size_t cap) {
     return feilian_fetch_peer_otp(c, vpn_base_url, public_key, NULL, body, cap);

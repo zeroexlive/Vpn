@@ -164,6 +164,19 @@ static void do_connect(App *a) {
      * so re-save the session now — the file written at login may
      * hold a stale value. */
     feilian_save_session(&a->api);
+    /* Portal refresh: the official client's webview loads the
+     * portal pages after login, and the node error 10220001 hints
+     * ("switch the menu on left navigation bar to refresh pages")
+     * that the node wants a cookie those pages set. Load them now
+     * and keep any new cookies — the jar is logged again before
+     * /vpn/conn so a new cookie name shows up there. */
+    {
+        int before = (int)strlen(a->api.cookies);
+        int n = feilian_refresh_portal(&a->api);
+        app_logf(a, "Portal refresh: %d of 5 pages loaded, cookies %d -> %d chars.", n, before, (int)strlen(a->api.cookies));
+        feilian_log_cookie_names(&a->api, a->log, sizeof a->log);
+        feilian_save_session(&a->api);
+    }
     /* 2. GET /api/vpn/list. The list has no "url" field — each
      * node has "ip" + "api_port" (here: 98.98.44.174:11451,
      * vpn_port 11450). /vpn/conn lives on the NODE, not the
@@ -275,7 +288,7 @@ static void do_connect(App *a) {
             app_logf(a, "Public key for this session: %s", a->wg_public);
         }
     } else {
-        app_logf(a, "Connect failed — the tunnel itself is brought up by the official client's local service (connectVpn), not by this HTTP call. Paste the vpn/list reply above and I will adjust the parser.");
+        app_logf(a, "Connect failed. Paste the 'Portal refresh', 'Cookies held', 'jwt-token header', 'vpn/ping' and 'vpn/conn' lines from the log above.");
     }
 }
 
@@ -290,7 +303,7 @@ int main(void) {
     if (gethostname(a.device_name, sizeof a.device_name - 1) != 0 ||
         !a.device_name[0])
         strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
-    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v17: node query string (uu.H params + timestamp), jwt-token header, ping reply logged)");
+    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v18: portal refresh after OTP verify to collect web-flow cookies)");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
     /* Restore a saved login session, if there is one — the official
      * client also stays logged in across restarts. A saved session
