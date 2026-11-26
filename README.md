@@ -112,10 +112,9 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
    checks email/password and, if correct, you go to the main layout.
 3. Main layout: press Connect. Two MFA ways, as in the official app:
    - Enter the 6-digit OTP from your mobile app (e.g. 617928) —
-     sent as `"otp"` in `POST /vpn/conn`. If the server returned a
-     TOTP secret via `GET /api/v2/p/otp` after login, the code is
-     generated locally (RFC 6238, server-time offset) and the field
-     can be left empty.
+     sent as `"otp"` in `POST /vpn/conn`. Or save the TOTP secret
+     once (see below) and leave the field empty — Connect generates
+     the code itself and the mobile app is no longer needed.
    - Confirm on mobile app (push): the client asks `/api/mfa/type`,
      and if `push` is offered it sends a push request, you approve
      it on your mobile app, then press Connect. Note: in the
@@ -131,6 +130,20 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
 ## Status / limits
 
+- v16: the Connect OTP can now be generated in the client itself —
+  no mobile app needed. The code is a standard TOTP (RFC 6238,
+  base32 secret, HMAC-SHA1, 6 digits, 30 s), and the generator
+  (`feilian_totp`) was already in the client; it just had no secret
+  to use, because 3.2.16 has no API to fetch one. Paste the base32
+  secret from your portal's authenticator setup (the QR code's
+  `secret=` value) into the "TOTP secret" field on the main layout
+  and press Save — it is kept in `~/.config/feilian-client/totp_secret`
+  (0600, never logged, never sent to the server) and Connect
+  generates the code from it. If your deployment only allows one
+  bound authenticator, binding a new one for this client may
+  replace the phone's — check the portal first. The mobile app's
+  authenticator works the same way (`OTPBean` holds the same
+  secret), so a code from either side is identical.
 - v15: the Android 3.2.16 APK was decompiled (jadx) and it showed
   why the node kept answering 10220001 "Cookies are missing": the
   official app's node requests carry `device_id` (= android_id) and

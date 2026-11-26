@@ -159,6 +159,19 @@ void feilian_log_cookie_names(feilian_client *c, char *log, size_t cap);
 int feilian_save_session(feilian_client *c);
 int feilian_load_session(feilian_client *c);
 int feilian_clear_session(void);
+
+/* TOTP secret for generating the Connect OTP locally (RFC 6238,
+ * same as the mobile app's authenticator: base32 secret, HMAC-SHA1,
+ * 6 digits, 30 s window). Stored in
+ * ~/.config/feilian-client/totp_secret, mode 0600 — the secret is
+ * as sensitive as a password and is never logged or sent anywhere;
+ * only the generated 6-digit code goes to the server. The secret
+ * comes from the deployment's authenticator setup (portal security
+ * settings / QR code's secret= parameter); there is no API to fetch
+ * an already-bound secret, and 3.2.16 has no /api/v2/p/otp. */
+int feilian_save_totp_secret(const char *secret);
+int feilian_load_totp_secret(char *out, size_t cap);
+int feilian_clear_totp_secret(void);
 int feilian_gen_wg_keypair(char *private_b64, size_t priv_cap,
                            char *public_b64, size_t pub_cap);
 

@@ -1107,3 +1107,71 @@ int feilian_clear_session(void) {
     if (session_path(path, sizeof path) != 0) return -1;
     return unlink(path);
 }
+
+/* --- TOTP secret, for generating the Connect OTP locally. --- */
+
+static int totp_secret_path(char *out, size_t cap) {
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) return -1;
+    snprintf(out, cap, "%s/.config/feilian-client/totp_secret", home);
+    return 0;
+}
+
+/* Strips whitespace, uppercases, and checks the secret is base32
+ * (A-Z, 2-7) and a plausible length. Returns 0 on success. */
+static int totp_secret_clean(const char *secret, char *out, size_t cap) {
+    size_t n = 0;
+    for (const char *p = secret; *p; p++) {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '-')
+            continue;
+        if (n + 1 >= cap) return -1;
+        char ch = *p;
+        if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+        if (!((ch >= 'A' && ch <= 'Z') || (ch >= '2' && ch <= '7')))
+            return -1;
+        out[n++] = ch;
+    }
+    out[n] = '\0';
+    /* Base32 secrets are a multiple of 8 chars; 16 is the usual
+     * minimum (80 bits). Accept 16..128. */
+    if (n < 16 || n > 128 || n % 8 != 0) return -1;
+    return 0;
+}
+
+int feilian_save_totp_secret(const char *secret) {
+    char clean[160];
+    if (totp_secret_clean(secret, clean, sizeof clean) != 0) return -1;
+    char path[1024];
+    if (totp_secret_path(path, sizeof path) != 0) return -1;
+    char dir[1024], parent[1024];
+    const char *home = getenv("HOME");
+    snprintf(parent, sizeof parent, "%s/.config", home);
+    snprintf(dir, sizeof dir, "%s/.config/feilian-client", home);
+    mkdir(parent, 0700);
+    mkdir(dir, 0700);
+    FILE *f = fopen(path, "w");
+    if (!f) return -1;
+    chmod(path, 0600);
+    fprintf(f, "%s\n", clean);
+    fclose(f);
+    return 0;
+}
+
+int feilian_load_totp_secret(char *out, size_t cap) {
+    char path[1024];
+    if (totp_secret_path(path, sizeof path) != 0) return -1;
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    char line[256];
+    if (!fgets(line, sizeof line, f)) { fclose(f); return -1; }
+    fclose(f);
+    line[strcspn(line, "\r\n")] = '\0';
+    if (totp_secret_clean(line, out, cap) != 0) return -1;
+    return 0;
+}
+
+int feilian_clear_totp_secret(void) {
+    char path[1024];
+    if (totp_secret_path(path, sizeof path) != 0) return -1;
+    return unlink(path);
+}

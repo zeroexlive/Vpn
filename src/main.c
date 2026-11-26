@@ -83,11 +83,16 @@ static void sync_api_from_ui(App *a) {
 }
 
 /* After a successful password login, 3.2.16 has NO /api/v2/p/otp
- * endpoint, so there is no TOTP secret to fetch. OTP at Connect is
- * entered from the mobile app. */
+ * endpoint, so there is no TOTP secret to fetch from the server.
+ * The secret comes from the deployment's authenticator setup
+ * (portal security settings / the QR code's secret= parameter) and
+ * is entered once in the main layout; from then on Connect
+ * generates the OTP itself. */
 static void try_fetch_totp_secret(App *a) {
-    (void)a;
-    app_logf(a, "OTP at Connect is entered from your mobile app.");
+    if (a->api.totp_secret[0])
+        app_logf(a, "TOTP secret is saved — Connect generates the OTP itself, no mobile app needed.");
+    else
+        app_logf(a, "No TOTP secret saved: enter the OTP from your mobile app, or paste the base32 secret from your portal's authenticator setup below to stop needing the phone.");
 }
 
 static void do_disconnect(App *a) {
@@ -276,7 +281,7 @@ int main(void) {
     if (gethostname(a.device_name, sizeof a.device_name - 1) != 0 ||
         !a.device_name[0])
         strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
-    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v15: device_id/device_name cookies on node requests, full /vpn/conn body, bare /vpn/conn path)");
+    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v16: TOTP secret — Connect generates the OTP itself, no mobile app needed)");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
     /* Restore a saved login session, if there is one — the official
      * client also stays logged in across restarts. A saved session
@@ -288,6 +293,11 @@ int main(void) {
         a.stage = 2;
         feilian_log(a.log, sizeof a.log, "Restored saved session for %s — no login needed.", a.username);
     }
+    /* A saved TOTP secret means Connect generates the OTP itself
+     * (feilian_totp, RFC 6238 — the same code the mobile app's
+     * authenticator shows). The secret itself is never logged. */
+    if (feilian_load_totp_secret(a.api.totp_secret, sizeof a.api.totp_secret) == 0)
+        feilian_log(a.log, sizeof a.log, "TOTP secret loaded — Connect will generate the OTP itself, no mobile app needed.");
 
     cui_app *app = cui_app_create(&(cui_app_desc){
         .title = "FeiLian Client", .width = 720, .height = 640});
@@ -419,8 +429,28 @@ int main(void) {
                 cui_text(ui, "Step 3 · Connect — the server will ask for MFA");
                 cui_input(ui, "otp", a.otp, sizeof a.otp,
                           .label = "One-Time Password",
-                          .placeholder = "6-digit code from your mobile app (e.g. 617928)");
-                cui_text(ui, "Enter the 6-digit OTP from your mobile app — it changes every 30 s.");
+                          .placeholder = "6-digit code from your mobile app (e.g. 617928) — leave empty if a TOTP secret is saved below");
+                cui_text(ui, "Enter the 6-digit OTP from your mobile app — it changes every 30 s. Or save a TOTP secret once and Connect generates it itself.");
+                cui_input(ui, "totp_secret", a.api.totp_secret, sizeof a.api.totp_secret,
+                          .label = "TOTP secret (base32)",
+                          .placeholder = "from your portal's authenticator setup, e.g. JBSWY3DPEHPK3PXP");
+                cui_row(ui, .gap = 8) {
+                    if (cui_button(ui, "Save TOTP secret")) {
+                        char code[7];
+                        if (feilian_totp(&a.api, a.api.totp_secret, code) != 0) {
+                            app_logf(&a, "That doesn't look like a base32 TOTP secret (16+ chars, A-Z and 2-7) — check it and try again. Nothing was saved.");
+                        } else if (feilian_save_totp_secret(a.api.totp_secret) == 0) {
+                            app_logf(&a, "TOTP secret saved (0600, never sent to the server) — Connect will now generate the OTP itself. Current code: %s", code);
+                        } else {
+                            app_logf(&a, "Could not save the TOTP secret.");
+                        }
+                    }
+                    if (cui_button(ui, "Clear TOTP secret")) {
+                        feilian_clear_totp_secret();
+                        memset(a.api.totp_secret, 0, sizeof a.api.totp_secret);
+                        app_logf(&a, "TOTP secret cleared — OTP goes back to the mobile app.");
+                    }
+                }
                 cui_row(ui, .gap = 8) {
                     if (cui_button(ui, "Connect", .variant = CUI_BUTTON_PRIMARY)) do_connect(&a);
                     if (cui_button(ui, "Disconnect")) do_disconnect(&a);
