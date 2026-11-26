@@ -175,6 +175,13 @@ static void do_connect(App *a) {
         int n = feilian_refresh_portal(&a->api);
         app_logf(a, "Portal refresh: %d of 5 pages loaded, cookies %d -> %d chars.", n, before, (int)strlen(a->api.cookies));
         feilian_log_cookie_names(&a->api, a->log, sizeof a->log);
+        /* The tenant config decides whether node requests must
+         * carry the Sign header — log it (it may also name the
+         * signing algorithms and the URLs they apply to). */
+        if (a->api.last_tenant_config[0])
+            app_logf(a, "Tenant config: %.800s", a->api.last_tenant_config);
+        else
+            app_logf(a, "Tenant config: (empty — the portal did not return one)");
         feilian_save_session(&a->api);
     }
     /* 2. GET /api/vpn/list. The list has no "url" field — each
@@ -303,7 +310,7 @@ int main(void) {
     if (gethostname(a.device_name, sizeof a.device_name - 1) != 0 ||
         !a.device_name[0])
         strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
-    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v18: portal refresh after OTP verify to collect web-flow cookies)");
+    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v19: log the tenant config — it decides whether node requests need the Sign header)");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
     /* Restore a saved login session, if there is one — the official
      * client also stays logged in across restarts. A saved session

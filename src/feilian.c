@@ -833,8 +833,14 @@ int feilian_refresh_portal(feilian_client *c) {
     int ok = 0;
     for (size_t i = 0; i < sizeof paths / sizeof paths[0]; i++) {
         build_url(url, sizeof url, c->server, paths[i], "", "");
-        if (feilian_https(c, "GET", url, NULL, scratch, sizeof scratch) >= 0)
-            ok++;
+        int st = feilian_https(c, "GET", url, NULL, scratch, sizeof scratch);
+        if (st >= 0) ok++;
+        /* Keep the tenant config: it carries the signing config
+         * (algorithms, rules per URL, max time desync) that decides
+         * whether the node requests must carry the Sign header. */
+        if (strcmp(paths[i], "/api/tenant/config") == 0 && st == 200)
+            strncpy(c->last_tenant_config, scratch,
+                    sizeof c->last_tenant_config - 1);
     }
     return ok;
 }

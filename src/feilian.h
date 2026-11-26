@@ -59,6 +59,11 @@ typedef struct {
     int last_ping_status;  /* HTTP status of the last GET <node>/vpn/ping */
     char last_ping_body[512]; /* first bytes of that ping reply (may carry
                                  a node session cookie or an error) */
+    char last_tenant_config[1024]; /* body of GET /api/tenant/config from
+                                 the portal refresh — carries the tenant
+                                 signing config (whether node requests
+                                 must carry the Sign header, and for
+                                 which URLs). */
     char last_error[512];  /* set by feilian_https on transport failure */
     int enable_self_signed; /* from /api/match: server uses a self-signed cert */
     char self_signed_cert[8192]; /* PEM from /api/match, if any */
