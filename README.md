@@ -34,7 +34,7 @@ corplink-go / corplink-rs clients:
 | List VPN | `GET {server}/api/vpn/list` (3.2.16 UI uses the local service `getVpnList`; the endpoint exists — unauthenticated GET answers code 101, not 404) |
 | Connect MFA (OTP) | `POST {server}/api/mfa/code/verify` `{"mfa_scene": "vpn", "code": "…", "code_type": "otp"}` — verify FIRST, then connect. The OTP is never sent to `/vpn/conn`. |
 | Connect MFA (push) | No HTTP endpoint: the official client uses the local corplink-service `sendPushConfirm {scene:"vpn"}`. `POST /api/mfa/code/send {"mfa_scene":"vpn","code_type":"push"}` answers `1003 Parameter is invalid`, and `POST /api/v1/login/mfa/send` with `mfa_type:"push"` is the *login* MFA send and answers `40004 Record not found` at Connect time. Use the OTP field. |
-| Fetch WireGuard peer | `POST https://<ip>:<api_port>/vpn/conn` (bare path, no query) `{"mode": "Split", "public_key": "…", "otp": "…", "export_id": 0, "sign_token": "", "not_auto": true}` — the exact shape from the official Android 3.2.16 client (`VpnConfigModel`). The reply's `data` holds `{ip, ipv6, ip_mask, public_key (base64), preshared_key (base64), sign_token, setting: {vpn_mtu, vpn_dns, …}}`. Posting it to the *portal* (`ourbit.sealsuite.com`) gives HTTP 404, because `/vpn/conn` does not exist there. |
+| Fetch WireGuard peer | `POST https://<ip>:<api_port>/vpn/conn?<query>` `{"mode": "Split", "public_key": "…", "otp": "…", "export_id": 0, "sign_token": "", "not_auto": true}` — the exact shape from the official Android 3.2.16 client (`VpnConfigModel` + `HttpsClientUtil`: the path is built bare, but the request helper appends a query string — `os`, `os_version`, `app_version`, `brand`, `model`, `language`, `build_number`, `os_version_patch`, `timestamp`, `client_source` — to every node request, ping and conn alike). The reply's `data` holds `{ip, ipv6, ip_mask, public_key (base64), preshared_key (base64), sign_token, setting: {vpn_mtu, vpn_dns, …}}`. Posting it to the *portal* (`ourbit.sealsuite.com`) gives HTTP 404, because `/vpn/conn` does not exist there. |
 
 **Saved session:** after a successful login the client saves the
 server, username and session cookies (never the password) to
@@ -130,6 +130,23 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
 ## Status / limits
 
+- v17: v15's device cookies were **not** enough — Connect still got
+  10220001 with device cookies + CSRF header + Origin/Referer. Two
+  more things the Android client sends on every node request that
+  this client didn't: (1) a query string on ping *and* conn
+  (`os`, `os_version`, `app_version`, `brand`, `model`, `language`,
+  `build_number`, `os_version_patch`, `timestamp` (server-adjusted),
+  `client_source`) — `VpnConfigModel` builds a bare path, but
+  `HttpsClientUtil` appends it in `requestPostJsonSync` /
+  `generateGetSyncCall`, which the first reading missed; (2) a
+  `jwt-token` header carrying the value of the stored `vpn-token`
+  cookie (interceptor `vj0`), sent whenever such a cookie is in the
+  jar. The ping reply is now logged too (it may set the node cookie
+  or carry an error). Ruled out in the same round: the SPA "knock"
+  — the user's deployment has `enable_spa: false` in its match
+  reply, so no UDP knock is needed. Remaining hypothesis if this
+  still fails: the `Sign` request header (interceptor `qd0`,
+  HMAC-SHA256 with a key from the native `generateHttpSignKey`).
 - v16: the Connect OTP can now be generated in the client itself —
   no mobile app needed. The code is a standard TOTP (RFC 6238,
   base32 secret, HMAC-SHA1, 6 digits, 30 s), and the generator

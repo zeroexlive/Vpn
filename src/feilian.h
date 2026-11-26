@@ -56,6 +56,9 @@ typedef struct {
     char cookies[4096];    /* Cookie: header value, accumulated from Set-Cookie */
     char totp_secret[128]; /* base32 TOTP secret from /api/v2/p/otp, if any */
     long date_offset_sec;  /* server Date minus local time, for TOTP */
+    int last_ping_status;  /* HTTP status of the last GET <node>/vpn/ping */
+    char last_ping_body[512]; /* first bytes of that ping reply (may carry
+                                 a node session cookie or an error) */
     char last_error[512];  /* set by feilian_https on transport failure */
     int enable_self_signed; /* from /api/match: server uses a self-signed cert */
     char self_signed_cert[8192]; /* PEM from /api/match, if any */

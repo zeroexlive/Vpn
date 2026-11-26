@@ -567,6 +567,17 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
             n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", c->cookies);
         else if (dev[0])
             n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", dev);
+        /* jwt-token — the official app's VPN client (interceptor
+         * vj0) adds this header with the value of the stored
+         * "vpn-token" cookie, when one exists. The cookie arrives
+         * via Set-Cookie from some earlier response (the jar keeps
+         * it by name); if no response ever set it, no header is
+         * sent, exactly like the official client. */
+        {
+            char tok[512];
+            if (cookie_value(c, "vpn-token", tok, sizeof tok))
+                n += snprintf(req + n, sizeof req - (size_t)n, "jwt-token: %s\r\n", tok);
+        }
     }
     /* CSRF headers — the portal's public web JS sends these on
      * EVERY request (getCsrfTokenHeaders: the csrf-token and
@@ -809,19 +820,45 @@ int feilian_fetch_peer(feilian_client *c, const char *vpn_base_url,
     return feilian_fetch_peer_otp(c, vpn_base_url, public_key, NULL, body, cap);
 }
 
+/* Query string the official Android 3.2.16 client appends to EVERY
+ * gateway-node request (HttpsClientUtil, uu.H: the entries of uu.B).
+ * VpnConfigModel builds a bare "/vpn/conn" path, but
+ * requestPostJsonSync then appends "?" + this string (and the GET
+ * helper does the same for /vpn/ping). The earlier "bare path, no
+ * query" reading missed that step. Fields, in order:
+ * os, os_version, app_version, brand, model, language,
+ * build_number, os_version_patch, timestamp (server-adjusted
+ * seconds), client_source. Desktop values stand in for the Android
+ * Build fields; timestamp uses the server Date offset already
+ * tracked for TOTP. */
+static void node_query(feilian_client *c, char *out, size_t cap) {
+    char brand[128] = "", model[256] = "";
+    url_encode_into(c->os[0] ? c->os : "Linux", brand, sizeof brand);
+    url_encode_into(c->device_name[0] ? c->device_name : "feilian-c-client",
+                    model, sizeof model);
+    long long ts = (long long)(time(NULL) + c->date_offset_sec);
+    snprintf(out, cap,
+             "?os=%s&os_version=%s&app_version=3.2.16&brand=%s&model=%s"
+             "&language=en-US&build_number=2008&os_version_patch="
+             "&timestamp=%lld&client_source=FeiLian",
+             c->os[0] ? c->os : "Linux",
+             c->os_version[0] ? c->os_version : "2",
+             brand, model, ts);
+}
+
 int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
                            const char *public_key, const char *otp,
                            char *body, size_t cap) {
-    /* Body and URL exactly as the official Android 3.2.16 client
-     * (VpnConfigModel.request): POST <node>/vpn/conn, bare path,
-     * no ?os= query, with {"mode","public_key","otp","export_id",
-     * "sign_token","not_auto"}. export_id comes from the vpn/list
-     * entry's "export" (null here -> 0); sign_token comes from the
+    /* Body exactly as the official Android 3.2.16 client
+     * (VpnConfigModel.request): POST <node>/vpn/conn with
+     * {"mode","public_key","otp","export_id","sign_token",
+     * "not_auto"}. export_id comes from the vpn/list entry's
+     * "export" (null here -> 0); sign_token comes from the
      * previous /vpn/conn reply's data.sign_token ("" on first
      * connect); mode is the user's chosen VPN mode (Split is the
      * official default); not_auto is true when the user picked a
      * named node instead of "Auto". */
-    char payload[1024], url[1024];
+    char payload[1024], url[1024], query[1024];
     if (otp && otp[0])
         snprintf(payload, sizeof payload,
                  "{\"mode\":\"Split\",\"public_key\":\"%s\",\"otp\":\"%s\","
@@ -837,19 +874,29 @@ int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
      * exposes a /vpn/ping route on the node, and the node answers
      * /vpn/conn with 10220001 "Cookies are missing" even when the
      * portal cookies are sent. Touch the node first — a ping may
-     * set the node-side session cookie that /vpn/conn then checks.
-     * Any Set-Cookie on the ping is accumulated into the jar by
-     * feilian_https, exactly like every other call.
-     * Both node calls also carry the device_id/device_name
-     * cookies (feilian_https, device_cookies_on) — the Android
-     * app's CookieJarImpl synthesises them for the node host. */
+     * set the node-side session cookie (e.g. vpn-token, sent back
+     * as the jwt-token header) that /vpn/conn then checks. The
+     * ping reply is kept in c->last_ping_status / c->last_ping_body
+     * so the UI can show it; any Set-Cookie on the ping is
+     * accumulated into the jar by feilian_https, exactly like
+     * every other call. Both node calls carry the device_id/
+     * device_name cookies (feilian_https, device_cookies_on) —
+     * the Android app's CookieJarImpl synthesises them for the
+     * node host — and the uu.H query string above. */
+    node_query(c, query, sizeof query);
     c->device_cookies_on = 1;
+    c->last_ping_status = -1;
+    c->last_ping_body[0] = '\0';
     {
-        char ping_url[1024], ping_body[512];
+        char ping_url[2048];
         build_url(ping_url, sizeof ping_url, base, "/vpn/ping", "", "");
-        feilian_https(c, "GET", ping_url, NULL, ping_body, sizeof ping_body);
+        strncat(ping_url, query, sizeof ping_url - strlen(ping_url) - 1);
+        c->last_ping_status =
+            feilian_https(c, "GET", ping_url, NULL,
+                          c->last_ping_body, sizeof c->last_ping_body);
     }
     build_url(url, sizeof url, base, "/vpn/conn", "", "");
+    strncat(url, query, sizeof url - strlen(url) - 1);
     int st = feilian_https(c, "POST", url, payload, body, cap);
     c->device_cookies_on = 0;
     return st;

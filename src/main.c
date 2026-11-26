@@ -238,6 +238,15 @@ static void do_connect(App *a) {
                  ? "yes (device_id ready)"
                  : "NO — could not determine a device id");
     st = feilian_fetch_peer_otp(&a->api, conn_base, a->wg_public, otp, body, sizeof body);
+    /* The node ping runs first inside the fetch — its reply is
+     * worth seeing: a ping that sets a node cookie (e.g. vpn-token,
+     * sent back as the jwt-token header) shows up in the jar below,
+     * and a ping error explains a conn failure. */
+    app_logf(a, "vpn/ping: HTTP %d — %.300s", a->api.last_ping_status,
+             a->api.last_ping_body[0] ? a->api.last_ping_body : "(empty)");
+    feilian_log_cookie_names(&a->api, a->log, sizeof a->log);
+    app_logf(a, "jwt-token header will be sent: %s",
+             feilian_has_cookie(&a->api, "vpn-token") ? "yes (vpn-token cookie present)" : "no (no vpn-token cookie in jar)");
     app_logf(a, "vpn/conn: HTTP %d", st);
     app_logf(a, "%.800s", body);
     if (st == 200 && feilian_json_code(body) == 0) {
@@ -281,7 +290,7 @@ int main(void) {
     if (gethostname(a.device_name, sizeof a.device_name - 1) != 0 ||
         !a.device_name[0])
         strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
-    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v16: TOTP secret — Connect generates the OTP itself, no mobile app needed)");
+    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v17: node query string (uu.H params + timestamp), jwt-token header, ping reply logged)");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
     /* Restore a saved login session, if there is one — the official
      * client also stays logged in across restarts. A saved session
