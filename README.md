@@ -34,7 +34,7 @@ corplink-go / corplink-rs clients:
 | List VPN | `GET {server}/api/vpn/list` (3.2.16 UI uses the local service `getVpnList`; the endpoint exists — unauthenticated GET answers code 101, not 404) |
 | Connect MFA (OTP) | `POST {server}/api/mfa/code/verify` `{"mfa_scene": "vpn", "code": "…", "code_type": "otp"}` — verify FIRST, then connect. The OTP is never sent to `/vpn/conn`. |
 | Connect MFA (push) | No HTTP endpoint: the official client uses the local corplink-service `sendPushConfirm {scene:"vpn"}`. `POST /api/mfa/code/send {"mfa_scene":"vpn","code_type":"push"}` answers `1003 Parameter is invalid`, and `POST /api/v1/login/mfa/send` with `mfa_type:"push"` is the *login* MFA send and answers `40004 Record not found` at Connect time. Use the OTP field. |
-| Fetch WireGuard peer | `POST {node url from the list}/vpn/conn` `{"public_key": "…", "otp": "…"}` — the old corplink-go path. Posting it to the *portal* (`ourbit.sealsuite.com`) gives HTTP 404, because `/vpn/conn` does not exist there. 3.2.16 UI uses the local service `connectVpn` instead. |
+| Fetch WireGuard peer | `POST https://<ip>:<api_port>/vpn/conn` (bare path, no query) `{"mode": "Split", "public_key": "…", "otp": "…", "export_id": 0, "sign_token": "", "not_auto": true}` — the exact shape from the official Android 3.2.16 client (`VpnConfigModel`). The reply's `data` holds `{ip, ipv6, ip_mask, public_key (base64), preshared_key (base64), sign_token, setting: {vpn_mtu, vpn_dns, …}}`. Posting it to the *portal* (`ourbit.sealsuite.com`) gives HTTP 404, because `/vpn/conn` does not exist there. |
 
 **Saved session:** after a successful login the client saves the
 server, username and session cookies (never the password) to
@@ -97,7 +97,7 @@ cmake --build build -j
 ```
 
 The log at the top of the app window shows the build version (e.g.
-`build v14`), so you can confirm you are running the latest one
+`build v15`), so you can confirm you are running the latest one
 before retrying a Connect.
 
 Needs a C99 compiler, CMake ≥ 3.14, OpenSSL dev headers, and on
@@ -131,7 +131,24 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 
 ## Status / limits
 
-- v2: company lookup fixed — the `/api/match` reply carries the
+- v15: the Android 3.2.16 APK was decompiled (jadx) and it showed
+  why the node kept answering 10220001 "Cookies are missing": the
+  official app's node requests carry `device_id` (= android_id) and
+  `device_name` (= bluetooth name) cookies, synthesised for the node
+  host by `CookieJarImpl`, on top of the portal session cookies —
+  and the desktop service does the same (`device_id`/`device_name`,
+  id from `/etc/machine-id`). This build mirrors it: the device id
+  is `/etc/machine-id` when readable, else a UUID generated once
+  and kept in `~/.config/feilian-client/device_id`; the device name
+  is the hostname. The `/vpn/conn` body is now the exact Android
+  shape (`mode`, `public_key`, `otp`, `export_id`, `sign_token`,
+  `not_auto`), posted to the bare `/vpn/conn` path, and the reply
+  is parsed from `data` (`ip`, `public_key`/`preshared_key` base64,
+  `setting.vpn_dns`/`vpn_mtu`), with the peer endpoint set to
+  `ip:vpn_port` from the list. If 10220001 persists, paste the
+  `Device cookies will be sent` line and the `vpn/conn` reply.
+- v14: Origin/Referer headers on every request, `GET /vpn/ping` on
+  the node before `POST /vpn/conn`, build version in the startup log.
   server in `data.domain` (not `url`), the client now uses the
   corplink-go User-Agent, honours `https_proxy`/`HTTPS_PROXY`
   (CONNECT tunnel) for proxied networks, and shows the server's
@@ -162,9 +179,10 @@ Linux `libx11-dev`. CUI is fetched at configure time (v1.5.0).
 - Not yet: automatic `wg-quick` bring-up (needs root + `wg` on the
   target), keep-alive reporting (`/vpn/report`), LDAP / Lark / OIDC
   platforms.
-- The peer reply is nested JSON; the top-level field extraction in
-  `src/main.c` is best-effort — if your server's shape differs, paste
-  the logged `/vpn/conn` reply and the parser can be adjusted to it.
+- The peer reply is parsed from `data` (`ip`, `public_key`,
+  `preshared_key`, `setting.vpn_dns`/`vpn_mtu`) as the Android
+  client does; if your server's shape differs, paste the logged
+  `/vpn/conn` reply and the parser can be adjusted to it.
 - To test login you need a real server URL / company code and
   credentials for a deployment you are allowed to use. None are
   stored in this repo.

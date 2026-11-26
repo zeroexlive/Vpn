@@ -5,18 +5,26 @@
 
 /* FeiLian / CorpLink login + VPN list + WireGuard peer flow.
  *
- * Endpoints confirmed two ways:
+ * Endpoints confirmed three ways:
  *  - strings in the official 3.2.16 Linux .deb (Electron UI + corplink-service):
  *    /api/v1/login, /api/login/setting, /api/vpn/list, /api/matchinternal
  *  - the public corplink-go / corplink-rs clients, which implement the same
  *    flow: https://github.com/kongfei605/corplink-go (api.go / client.go)
- *      POST https://corplink.volcengine.cn/api/match  {"code": "<company>"}
- *      GET  {server}/api/login/setting?os={os}&os_version={ver}
- *      POST {server}/api/login?os={os}&os_version={ver}
- *           {"user_name": "...", "password": "<sha256 hex>", "platform": "feilian"}
- *      GET  {server}/api/vpn/list?os={os}&os_version={ver}
- *      POST {server}/vpn/conn?os={os}&os_version={ver}   (fetch WireGuard peer)
- *      POST {server}/vpn/report?os={os}&os_version={ver} (keep-alive / disconnect)
+ *  - the official 3.2.16 Android APK (jadx decompile of classes2.dex):
+ *    com.bytedance.topgo.base.vpn.VpnConfigModel posts the WireGuard
+ *    config to https://<ip>:<api_port>/vpn/conn (bare path, no query)
+ *    with {"mode":"Split","public_key":…,"otp":…,"export_id":0,
+ *    "sign_token":"…","not_auto":true}, and the reply's data holds
+ *    {ip, ipv6, ip_mask, public_key (base64), preshared_key (base64),
+ *    sign_token, setting:{vpn_mtu, vpn_dns, …}}. The node request goes
+ *    through OkHttp with CookieJarImpl(true, true) + HttpHeaderInterceptor:
+ *    portal cookies are forwarded to the node despite the domain
+ *    mismatch, AND the app synthesises device_id (= android_id) and
+ *    device_name (= bluetooth name) cookies for the node host, plus a
+ *    csrf-token header. Without the device cookies the node answers
+ *    10220001 "Cookies are missing". This client mirrors that: the
+ *    device id comes from /etc/machine-id (like the desktop service's
+ *    device.conf) or a generated UUID, device_name is the hostname.
  *
  * This is a login-and-connect client only. It does not implement the
  * endpoint-security / device-baseline / DLP parts of the official client,
@@ -41,6 +49,10 @@ typedef struct {
     char os[32];           /* "Linux" | "Windows" | "Mac" | "Android" */
     char os_version[32];   /* e.g. "2" (corplink-go) — keep as the server expects */
     char device_name[128];
+    char device_id[64];    /* stable per-machine id, like the desktop service's
+                              device.conf / Android's android_id. Sent as a
+                              device_id cookie on gateway-node requests. */
+    int device_cookies_on; /* append device_id/device_name cookies (node only) */
     char cookies[4096];    /* Cookie: header value, accumulated from Set-Cookie */
     char totp_secret[128]; /* base32 TOTP secret from /api/v2/p/otp, if any */
     long date_offset_sec;  /* server Date minus local time, for TOTP */
@@ -150,16 +162,25 @@ int feilian_clear_session(void);
 int feilian_gen_wg_keypair(char *private_b64, size_t priv_cap,
                            char *public_b64, size_t pub_cap);
 
-/* Write a wg-quick style config. Returns 0 on success. */
+/* Write a wg-quick style config. Returns 0 on success.
+ * preshared may be "" (omitted); endpoint is "ip:vpn_port". */
 int feilian_write_wg_conf(const char *path, const char *address,
                           const char *private_key, const char *peer_key,
-                          const char *endpoint, const char *dns,
-                          int mtu);
+                          const char *preshared, const char *endpoint,
+                          const char *dns, int mtu);
 
 /* Minimal JSON helpers (no JSON library, to keep this dependency-free). */
 int feilian_json_code(const char *body); /* "code": N, or -1 */
+int feilian_json_int(const char *body, const char *key); /* "key": N, or -1 */
 int feilian_json_string(const char *body, const char *key,
                         char *out, size_t cap);
+
+/* Stable per-machine device id (desktop service's device.conf /
+ * Android's android_id equivalent): /etc/machine-id when readable,
+ * else a UUIDv4 generated once and kept in
+ * $HOME/.config/feilian-client/device_id (0600). Cached in
+ * c->device_id. Returns 0 on success. */
+int feilian_ensure_device_id(feilian_client *c);
 
 void feilian_sha256_hex(const char *input, char *out_hex); /* 64 hex + NUL */
 

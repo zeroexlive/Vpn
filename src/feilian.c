@@ -3,6 +3,7 @@
 #include "feilian.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <netdb.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -103,6 +104,17 @@ int feilian_json_code(const char *body) {
     return atoi(p + 1);
 }
 
+/* Find "key": N (first occurrence). Returns the number, or -1. */
+int feilian_json_int(const char *body, const char *key) {
+    char pat[128];
+    snprintf(pat, sizeof pat, "\"%s\"", key);
+    const char *p = strstr(body, pat);
+    if (!p) return -1;
+    p = strchr(p + strlen(pat), ':');
+    if (!p) return -1;
+    return atoi(p + 1);
+}
+
 /* Find "key":"value" (first occurrence, top-level-ish). */
 int feilian_json_string(const char *body, const char *key,
                         char *out, size_t cap) {
@@ -148,6 +160,96 @@ static int feilian_json_bool(const char *body, const char *key) {
     if (strncmp(p, "true", 4) == 0) return 1;
     if (strncmp(p, "false", 5) == 0) return 0;
     return -1;
+}
+
+static int read_first_line_trimmed(const char *path, char *out, size_t cap) {
+    FILE *f = fopen(path, "r");
+    if (!f) return -1;
+    if (!fgets(out, (int)cap, f)) { fclose(f); return -1; }
+    fclose(f);
+    size_t n = strlen(out);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
+                     out[n - 1] == ' ' || out[n - 1] == '\t'))
+        out[--n] = '\0';
+    return n > 0 ? 0 : -1;
+}
+
+/* Device identity for gateway-node requests (Android APK 3.2.16,
+ * CookieJarImpl.loadAllCookie + HttpHeaderInterceptor): the
+ * official app sends device_id and device_name cookies on EVERY
+ * node request, synthesised for the node host, in addition to the
+ * portal session cookies. The desktop corplink-service does the
+ * same (device_id/device_name protobuf fields, "gen did",
+ * device.conf); its id comes from /etc/machine-id or the DMI
+ * product UUID. Without these the node answers 10220001
+ * "Cookies are missing", even with the portal cookies present. */
+int feilian_ensure_device_id(feilian_client *c) {
+    if (c->device_id[0]) return 0;
+    /* 1. /etc/machine-id — the desktop service's source. */
+    char buf[128] = "";
+    if (read_first_line_trimmed("/etc/machine-id", buf, sizeof buf) == 0) {
+        size_t n = strlen(buf);
+        int hex = n == 32;
+        for (size_t i = 0; hex && i < n; i++)
+            if (!isxdigit((unsigned char)buf[i])) hex = 0;
+        if (hex) {
+            strncpy(c->device_id, buf, sizeof c->device_id - 1);
+            return 0;
+        }
+    }
+    /* 2. A UUID generated once and kept in the client config dir. */
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+        char dir[1024], parent[1024], path[2048];
+        snprintf(parent, sizeof parent, "%s/.config", home);
+        snprintf(dir, sizeof dir, "%s/.config/feilian-client", home);
+        mkdir(parent, 0700);
+        mkdir(dir, 0700);
+        snprintf(path, sizeof path, "%s/device_id", dir);
+        if (read_first_line_trimmed(path, buf, sizeof buf) == 0 && buf[0]) {
+            strncpy(c->device_id, buf, sizeof c->device_id - 1);
+            return 0;
+        }
+        unsigned char rnd[16];
+        if (RAND_bytes(rnd, sizeof rnd) == 1) {
+            rnd[6] = (unsigned char)((rnd[6] & 0x0f) | 0x40); /* version 4 */
+            rnd[8] = (unsigned char)((rnd[8] & 0x3f) | 0x80); /* variant 10 */
+            snprintf(c->device_id, sizeof c->device_id,
+                     "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-"
+                     "%02x%02x%02x%02x%02x%02x",
+                     rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5],
+                     rnd[6], rnd[7], rnd[8], rnd[9], rnd[10], rnd[11],
+                     rnd[12], rnd[13], rnd[14], rnd[15]);
+            FILE *f = fopen(path, "w");
+            if (f) {
+                chmod(path, 0600);
+                fputs(c->device_id, f);
+                fclose(f);
+            }
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/* Percent-encode a cookie value the way Android's URLEncoder does
+ * for the device name (letters/digits and . - * _ pass through). */
+static void url_encode_into(const char *in, char *out, size_t cap) {
+    static const char *hex = "0123456789ABCDEF";
+    size_t o = 0;
+    for (const unsigned char *p = (const unsigned char *)in; *p && o + 4 < cap; p++) {
+        unsigned char ch = *p;
+        if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+            (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' ||
+            ch == '*' || ch == '_') {
+            out[o++] = (char)ch;
+        } else {
+            out[o++] = '%';
+            out[o++] = hex[(ch >> 4) & 0xf];
+            out[o++] = hex[ch & 0xf];
+        }
+    }
+    out[o] = '\0';
 }
 
 static void accumulate_cookies(feilian_client *c, const char *headers) {
@@ -441,10 +543,31 @@ int feilian_https(feilian_client *c, const char *method, const char *url,
     int n = snprintf(req, sizeof req,
         "%s %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s\r\n"
         "Content-Type: application/json\r\nAccept: application/json\r\n"
-        "Accept-Language: en\r\n",
+        "Accept-Language: en-US\r\n",
         method, path, host, FEILIAN_USER_AGENT);
-    if (c->cookies[0])
-        n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", c->cookies);
+    if (c->cookies[0] || c->device_cookies_on) {
+        /* The portal cookies go on every request; the device
+         * cookies only on gateway-node requests (see
+         * feilian_fetch_peer_otp), exactly like the official
+         * app's vpn HttpClient. */
+        char dev[1024] = "";
+        if (c->device_cookies_on) {
+            char dname[256] = "";
+            if (feilian_ensure_device_id(c) == 0) {
+                url_encode_into(c->device_name[0] ? c->device_name : "feilian-c-client",
+                                dname, sizeof dname);
+                snprintf(dev, sizeof dev, "device_id=%s; device_name=%s",
+                         c->device_id, dname);
+            }
+        }
+        if (c->cookies[0] && dev[0])
+            n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s; %s\r\n",
+                          c->cookies, dev);
+        else if (c->cookies[0])
+            n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", c->cookies);
+        else if (dev[0])
+            n += snprintf(req + n, sizeof req - (size_t)n, "Cookie: %s\r\n", dev);
+    }
     /* CSRF headers — the portal's public web JS sends these on
      * EVERY request (getCsrfTokenHeaders: the csrf-token and
      * admin-csrf-token cookie values as headers). Login and
@@ -689,12 +812,26 @@ int feilian_fetch_peer(feilian_client *c, const char *vpn_base_url,
 int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
                            const char *public_key, const char *otp,
                            char *body, size_t cap) {
-    char payload[512], url[1024];
+    /* Body and URL exactly as the official Android 3.2.16 client
+     * (VpnConfigModel.request): POST <node>/vpn/conn, bare path,
+     * no ?os= query, with {"mode","public_key","otp","export_id",
+     * "sign_token","not_auto"}. export_id comes from the vpn/list
+     * entry's "export" (null here -> 0); sign_token comes from the
+     * previous /vpn/conn reply's data.sign_token ("" on first
+     * connect); mode is the user's chosen VPN mode (Split is the
+     * official default); not_auto is true when the user picked a
+     * named node instead of "Auto". */
+    char payload[1024], url[1024];
     if (otp && otp[0])
         snprintf(payload, sizeof payload,
-                 "{\"public_key\":\"%s\",\"otp\":\"%s\"}", public_key, otp);
+                 "{\"mode\":\"Split\",\"public_key\":\"%s\",\"otp\":\"%s\","
+                 "\"export_id\":0,\"sign_token\":\"\",\"not_auto\":true}",
+                 public_key, otp);
     else
-        snprintf(payload, sizeof payload, "{\"public_key\":\"%s\"}", public_key);
+        snprintf(payload, sizeof payload,
+                 "{\"mode\":\"Split\",\"public_key\":\"%s\","
+                 "\"export_id\":0,\"sign_token\":\"\",\"not_auto\":true}",
+                 public_key);
     const char *base = vpn_base_url && vpn_base_url[0] ? vpn_base_url : c->server;
     /* The gateway node has its own session: the official service
      * exposes a /vpn/ping route on the node, and the node answers
@@ -702,16 +839,20 @@ int feilian_fetch_peer_otp(feilian_client *c, const char *vpn_base_url,
      * portal cookies are sent. Touch the node first — a ping may
      * set the node-side session cookie that /vpn/conn then checks.
      * Any Set-Cookie on the ping is accumulated into the jar by
-     * feilian_https, exactly like every other call. */
+     * feilian_https, exactly like every other call.
+     * Both node calls also carry the device_id/device_name
+     * cookies (feilian_https, device_cookies_on) — the Android
+     * app's CookieJarImpl synthesises them for the node host. */
+    c->device_cookies_on = 1;
     {
         char ping_url[1024], ping_body[512];
-        build_url(ping_url, sizeof ping_url, base, "/vpn/ping?os=%s&os_version=%s",
-                  c->os, c->os_version);
+        build_url(ping_url, sizeof ping_url, base, "/vpn/ping", "", "");
         feilian_https(c, "GET", ping_url, NULL, ping_body, sizeof ping_body);
     }
-    build_url(url, sizeof url, base, "/vpn/conn?os=%s&os_version=%s",
-              c->os, c->os_version);
-    return feilian_https(c, "POST", url, payload, body, cap);
+    build_url(url, sizeof url, base, "/vpn/conn", "", "");
+    int st = feilian_https(c, "POST", url, payload, body, cap);
+    c->device_cookies_on = 0;
+    return st;
 }
 
 int feilian_get_otp_uri(feilian_client *c, char *body, size_t cap) {
@@ -863,16 +1004,21 @@ int feilian_gen_wg_keypair(char *private_b64, size_t priv_cap,
 
 int feilian_write_wg_conf(const char *path, const char *address,
                           const char *private_key, const char *peer_key,
-                          const char *endpoint, const char *dns, int mtu) {
+                          const char *preshared, const char *endpoint,
+                          const char *dns, int mtu) {
     FILE *f = fopen(path, "w");
     if (!f) return -1;
     fprintf(f, "[Interface]\nPrivateKey = %s\nAddress = %s\n",
             private_key, address);
     if (dns && dns[0]) fprintf(f, "DNS = %s\n", dns);
     if (mtu > 0) fprintf(f, "MTU = %d\n", mtu);
-    fprintf(f, "\n[Peer]\nPublicKey = %s\nEndpoint = %s\n"
+    fprintf(f, "\n[Peer]\nPublicKey = %s\n",
+            peer_key);
+    if (preshared && preshared[0])
+        fprintf(f, "PresharedKey = %s\n", preshared);
+    fprintf(f, "Endpoint = %s\n"
                "AllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n",
-            peer_key, endpoint);
+            endpoint);
     fclose(f);
     return 0;
 }

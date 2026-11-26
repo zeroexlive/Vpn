@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/utsname.h>
+#include <unistd.h>
 
 #include "feilian.h"
 
@@ -168,9 +169,9 @@ static void do_connect(App *a) {
     app_logf(a, "vpn/list: HTTP %d", st);
     app_logf(a, "%.800s", body);
     char node_base[512] = "";
+    char node_ip[64] = "";
+    long api_port = 0, vpn_port = 0;
     if (st == 200) {
-        char node_ip[64] = "";
-        long api_port = 0;
         /* First "url" value, if the old corplink-go shape shows up. */
         const char *u = strstr(body, "\"url\"");
         if (u) {
@@ -201,6 +202,11 @@ static void do_connect(App *a) {
                 const char *colon = strchr(ap, ':');
                 if (colon) api_port = strtol(colon + 1, NULL, 10);
             }
+            const char *vp = strstr(body, "\"vpn_port\"");
+            if (vp) {
+                const char *colon = strchr(vp, ':');
+                if (colon) vpn_port = strtol(colon + 1, NULL, 10);
+            }
             if (node_ip[0]) {
                 if (api_port > 0)
                     snprintf(node_base, sizeof node_base, "https://%s:%ld", node_ip, api_port);
@@ -217,17 +223,37 @@ static void do_connect(App *a) {
     feilian_log_cookie_names(&a->api, a->log, sizeof a->log);
     app_logf(a, "CSRF header will be sent: %s",
              feilian_has_cookie(&a->api, "csrf-token") ? "yes (csrf-token cookie present)" : "NO — csrf-token cookie missing from jar");
+    /* Device cookies (Android APK: CookieJarImpl synthesises
+     * device_id + device_name for the node host on every node
+     * request). The id is stable per machine — /etc/machine-id
+     * when readable, else a generated UUID kept in the config
+     * dir — and is never printed, only whether it is ready. */
+    app_logf(a, "Device cookies will be sent: %s",
+             feilian_ensure_device_id(&a->api) == 0
+                 ? "yes (device_id ready)"
+                 : "NO — could not determine a device id");
     st = feilian_fetch_peer_otp(&a->api, conn_base, a->wg_public, otp, body, sizeof body);
     app_logf(a, "vpn/conn: HTTP %d", st);
     app_logf(a, "%.800s", body);
     if (st == 200 && feilian_json_code(body) == 0) {
-        char peer_key[128] = "", ip[64] = "", dns[128] = "";
+        /* The reply's data holds the WireGuard peer: ip (tunnel
+         * address), public_key (server key, base64 — the native
+         * wg-quick format), preshared_key (base64, may be empty),
+         * and setting.{vpn_dns, vpn_mtu}. Endpoint is the node
+         * ip:vpn_port from the list (11450 here). */
+        char peer_key[128] = "", ip[64] = "", dns[128] = "", psk[128] = "";
         feilian_json_string(body, "public_key", peer_key, sizeof peer_key);
         feilian_json_string(body, "ip", ip, sizeof ip);
-        feilian_json_string(body, "dns", dns, sizeof dns);
+        feilian_json_string(body, "preshared_key", psk, sizeof psk);
+        feilian_json_string(body, "vpn_dns", dns, sizeof dns);
+        int mtu = feilian_json_int(body, "vpn_mtu");
         if (peer_key[0] && ip[0]) {
+            char endpoint[128] = "";
+            if (node_ip[0] && vpn_port > 0)
+                snprintf(endpoint, sizeof endpoint, "%s:%ld", node_ip, vpn_port);
             const char *path = "corplink.conf";
-            feilian_write_wg_conf(path, ip, a->wg_private, peer_key, "", dns, 1420);
+            feilian_write_wg_conf(path, ip, a->wg_private, peer_key, psk,
+                                  endpoint, dns, mtu > 0 ? mtu : 1420);
             app_logf(a, "Connected — wrote %s, then: sudo wg-quick up %s", path, path);
             a->connected = 1;
         } else {
@@ -244,8 +270,13 @@ int main(void) {
     memset(&a, 0, sizeof a);
     a.os_index = 0; /* Linux — the OS this binary is running on */
     strncpy(a.api.os_version, "2", sizeof a.api.os_version - 1);
-    strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
-    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v14: CSRF headers, Origin/Referer, node ping before /vpn/conn)");
+    /* Device name for the device_name cookie on node requests:
+     * the hostname, like the desktop service's device name
+     * (Android sends the bluetooth name). */
+    if (gethostname(a.device_name, sizeof a.device_name - 1) != 0 ||
+        !a.device_name[0])
+        strncpy(a.device_name, "feilian-c-client", sizeof a.device_name - 1);
+    feilian_log(a.log, sizeof a.log, "FeiLian C client — login + connect only. (build v15: device_id/device_name cookies on node requests, full /vpn/conn body, bare /vpn/conn path)");
     feilian_log(a.log, sizeof a.log, "Step 1: pick the OS, enter the company code.");
     /* Restore a saved login session, if there is one — the official
      * client also stays logged in across restarts. A saved session
